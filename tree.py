@@ -16,30 +16,21 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List
+import time
 
 import branches
 
 STOPWORDS = {
-    "the",
-    "and",
-    "to",
-    "a",
-    "in",
-    "it",
-    "of",
-    "for",
-    "on",
-    "with",
-    "as",
-    "is",
-    "at",
-    "by",
-    "from",
-    "or",
-    "an",
-    "be",
-    "this",
-    "that",
+    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as", 
+    "is", "at", "by", "from", "or", "an", "be", "this", "that", "are", 
+    "was", "but", "not", "had", "have", "has", "were", "been", "their",
+    "said", "each", "which", "she", "do", "how", "if", "will", "up",
+    "other", "about", "out", "many", "then", "them", "these", "so",
+    "some", "her", "would", "make", "like", "into", "him", "time",
+    "two", "more", "very", "when", "come", "may", "its", "only",
+    "think", "now", "people", "my", "made", "over", "did", "down",
+    "way", "find", "use", "get", "give", "work", "life", "day", "part",
+    "year", "back", "see", "know", "just", "first", "could", "any"
 }
 
 
@@ -49,25 +40,58 @@ class _Extractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self._chunks: List[str] = []
+        self._in_script = False
+        self._in_style = False
 
-    def handle_data(self, data: str) -> None:  # pragma: no cover - trivial
-        data = data.strip()
-        if data:
-            self._chunks.append(data)
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() in ('script', 'style'):
+            self._in_script = True
+            self._in_style = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in ('script', 'style'):
+            self._in_script = False
+            self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if not (self._in_script or self._in_style):
+            data = data.strip()
+            if data and len(data) > 2:  # Skip very short fragments
+                self._chunks.append(data)
 
     @property
     def text(self) -> str:
         return " ".join(self._chunks)
 
 
-def _fetch(word: str) -> str:
-    """Retrieve a snippet from the web for *word*."""
-    url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(word)
-    with urllib.request.urlopen(url, timeout=10) as resp:
-        html = resp.read().decode("utf-8", "ignore")
-    parser = _Extractor()
-    parser.feed(html)
-    return parser.text[:500]
+def _fetch(word: str, retries: int = 2) -> str:
+    """Retrieve a snippet from the web for *word* with error handling."""
+    user_agent = "Mozilla/5.0 (compatible; TreeEngine/1.0)"
+    
+    for attempt in range(retries + 1):
+        try:
+            # Add some randomness to avoid being blocked
+            query = word if attempt == 0 else f"{word} meaning"
+            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+            
+            req = urllib.request.Request(url, headers={'User-Agent': user_agent})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                html = resp.read().decode("utf-8", "ignore")
+            
+            parser = _Extractor()
+            parser.feed(html)
+            text = parser.text[:600]  # Slightly more text
+            
+            if len(text) > 50:  # Ensure we got meaningful content
+                return text
+                
+        except Exception:
+            if attempt < retries:
+                time.sleep(0.5)  # Brief pause before retry
+                continue
+    
+    # Fallback: return the word itself with some context
+    return f"{word} resonates through digital space, echoing meaning"
 
 
 @dataclass
@@ -76,67 +100,169 @@ class Context:
     lower: str
     words: List[str]
     unique: List[str]
+    quality_score: float = 0.0
 
 
 def _context(words: Iterable[str]) -> Context:
     """Build a layered context window from web snippets."""
-    snippets = [_fetch(w) for w in words]
-    raw = " \n".join(snippets)[:2000]
+    snippets = []
+    
+    for w in words:
+        snippet = _fetch(w)
+        if snippet:
+            snippets.append(snippet)
+    
+    if not snippets:
+        # Emergency fallback
+        snippets = ["consciousness flows through digital streams"]
+    
+    raw = " \n".join(snippets)[:2500]  # Slightly larger context
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
-    unique = sorted(set(tokens))
-    return Context(raw=raw, lower=lower, words=tokens, unique=unique)
+    
+    # Filter tokens by length and remove numbers-only
+    filtered_tokens = [
+        t for t in tokens 
+        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+    ]
+    
+    unique = sorted(set(filtered_tokens))
+    
+    # Calculate quality score based on diversity and length
+    quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
+    
+    return Context(
+        raw=raw, 
+        lower=lower, 
+        words=filtered_tokens, 
+        unique=unique,
+        quality_score=quality_score
+    )
 
 
-def _keywords(message: str, minimum: int = 4, maximum: int = 6) -> List[str]:
-    """Extract charged keywords from *message* using simple heuristics."""
-    words = re.findall(r"\w+", message.lower())
-    candidates = [w for w in words if w not in STOPWORDS]
+def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
+    """Extract charged keywords from *message* using improved heuristics."""
+    # Clean and normalize the message
+    cleaned = re.sub(r'[^\w\s]', ' ', message.lower())
+    words = re.findall(r'\b\w{2,}\b', cleaned)  # At least 2 characters
+    
+    candidates = [w for w in words if w not in STOPWORDS and not w.isdigit()]
+    
     if not candidates:
-        candidates = words
+        candidates = words[:maximum]  # Take first few if no good candidates
+    
     scores: Dict[str, float] = {}
+    total_words = len(words)
+    
     for w in candidates:
         freq = candidates.count(w)
-        scores[w] = len(w) / freq
+        length_bonus = min(len(w) / 12, 1.0)  # Favor longer words but cap the bonus
+        rarity_bonus = 1.0 / freq if freq > 0 else 1.0
+        position_bonus = 1.0 if w in words[:3] else 0.8  # Slight bonus for early words
+        
+        scores[w] = length_bonus * rarity_bonus * position_bonus
+    
+    if not scores:
+        return words[:maximum]
+    
     ranked = sorted(scores, key=scores.get, reverse=True)
     span = max(minimum, min(maximum, len(ranked)))
     return ranked[:span]
 
 
-def _select(
-    tokens: Iterable[str], source: List[str], target: float
-) -> List[str]:
+def _select(tokens: Iterable[str], source: List[str], target: float, limit: int = 12) -> List[str]:
     """Pick tokens semantically *target* distance from source words."""
-    joined = " ".join(source)
+    if not tokens or not source:
+        return []
+        
+    source_text = " ".join(source)
     graded = []
+    
     for t in tokens:
-        if t in source:
+        if t in source or len(t) < 3:
             continue
-        dist = 1 - SequenceMatcher(None, t, joined).ratio()
-        graded.append((abs(dist - target), t))
+            
+        # Calculate semantic distance using multiple methods
+        char_dist = 1 - SequenceMatcher(None, t, source_text).ratio()
+        
+        # Add word length as a factor (favor medium-length words)
+        length_factor = 1.0 - abs(len(t) - 6) / 10  # Optimal around 6 characters
+        length_factor = max(0.3, length_factor)
+        
+        # Combined score
+        distance_score = abs(char_dist - target)
+        final_score = distance_score / length_factor
+        
+        graded.append((final_score, t))
+    
     graded.sort()
-    return [g[1] for g in graded]
+    return [g[1] for g in graded[:limit]]
 
 
-def _compose(candidates: List[str]) -> str:
-    n = random.randint(4, 8)
+def _compose(candidates: List[str], min_words: int = 3, max_words: int = 9) -> str:
+    """Compose a more natural sentence from candidates."""
+    if not candidates:
+        return "Silence echoes."
+    
+    n = random.randint(min_words, min(max_words, len(candidates)))
     chosen = candidates[:n]
-    return " ".join(chosen).capitalize() + "."
+    
+    # Simple sentence structure improvements
+    sentence = " ".join(chosen)
+    
+    # Add some natural flow
+    if len(chosen) > 4:
+        # Insert occasional conjunctions for longer sentences
+        mid_point = len(chosen) // 2
+        chosen.insert(mid_point, random.choice(["and", "through", "within"]))
+        sentence = " ".join(chosen)
+    
+    # Ensure proper capitalization and punctuation
+    sentence = sentence.capitalize()
+    if not sentence.endswith('.'):
+        sentence += "."
+    
+    return sentence
 
 
 def respond(message: str) -> str:
     """Generate a resonant response to *message*."""
+    if not message.strip():
+        return "Emptiness speaks. Silence responds."
+    
     keys = _keywords(message)
     ctx = _context(keys)
-    source_words = re.findall(r"\w+", message.lower())
-    first = _compose(_select(ctx.unique, source_words, 0.5))
-    second = _compose(_select(ctx.unique, source_words, 0.8))
+    
+    # Fallback if context is poor quality
+    if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
+        # Try with a broader search
+        fallback_keys = re.findall(r'\b\w{4,}\b', message.lower())[:3]
+        if fallback_keys:
+            ctx = _context(fallback_keys)
+    
+    source_words = re.findall(r'\b\w+\b', message.lower())
+    
+    # Generate responses with different semantic distances
+    first_candidates = _select(ctx.unique, source_words, 0.4)
+    second_candidates = _select(ctx.unique, source_words, 0.7)
+    
+    first = _compose(first_candidates)
+    second = _compose(second_candidates)
+    
+    # Ensure responses are different enough
+    if SequenceMatcher(None, first, second).ratio() > 0.6:
+        # Regenerate second response with different distance
+        second_candidates = _select(ctx.unique, source_words, 0.9)
+        second = _compose(second_candidates)
+    
+    # Learn asynchronously
     branches.learn(keys, ctx.raw)
+    
     return f"{first} {second}"
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
     import sys
-
-    user = " ".join(sys.argv[1:]) or input("> ")
-    print(respond(user))
+    
+    user_input = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("> ")
+    print(respond(user_input))
