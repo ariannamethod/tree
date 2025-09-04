@@ -12,17 +12,20 @@ import random
 import re
 import urllib.parse
 import urllib.request
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List
+import math
 import time
 
 import branches
+import roots
 
 STOPWORDS = {
-    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as", 
-    "is", "at", "by", "from", "or", "an", "be", "this", "that", "are", 
+    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as",
+    "is", "at", "by", "from", "or", "an", "be", "this", "that", "are",
     "was", "but", "not", "had", "have", "has", "were", "been", "their",
     "said", "each", "which", "she", "do", "how", "if", "will", "up",
     "other", "about", "out", "many", "then", "them", "these", "so",
@@ -67,29 +70,31 @@ class _Extractor(HTMLParser):
 def _fetch(word: str, retries: int = 2) -> str:
     """Retrieve a snippet from the web for *word* with error handling."""
     user_agent = "Mozilla/5.0 (compatible; TreeEngine/1.0)"
-    
+
     for attempt in range(retries + 1):
         try:
             # Add some randomness to avoid being blocked
             query = word if attempt == 0 else f"{word} meaning"
             url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-            
-            req = urllib.request.Request(url, headers={'User-Agent': user_agent})
+
+            req = urllib.request.Request(
+                url, headers={'User-Agent': user_agent}
+            )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 html = resp.read().decode("utf-8", "ignore")
-            
+
             parser = _Extractor()
             parser.feed(html)
             text = parser.text[:600]  # Slightly more text
-            
+
             if len(text) > 50:  # Ensure we got meaningful content
                 return text
-                
+
         except Exception:
             if attempt < retries:
                 time.sleep(0.5)  # Brief pause before retry
                 continue
-    
+
     # Fallback: return the word itself with some context
     return f"{word} resonates through digital space, echoing meaning"
 
@@ -103,38 +108,69 @@ class Context:
     quality_score: float = 0.0
 
 
+NGRAMS: Dict[str, Counter[str]] = defaultdict(Counter)
+
+
+def _update_ngram_with_text(text: str) -> None:
+    tokens = [
+        t for t in re.findall(r"\w+", text.lower())
+        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+    ]
+    for a, b in zip(tokens, tokens[1:]):
+        NGRAMS[a][b] += 1
+
+
+def _update_ngrams_from_roots(limit: int = 100) -> None:
+    for _, ctx in roots.recall(limit):
+        _update_ngram_with_text(ctx)
+
+
+def _normalize(counter: Counter[str]) -> Dict[str, float]:
+    if not counter:
+        return {}
+    norm = math.sqrt(sum(v * v for v in counter.values()))
+    return {k: v / norm for k, v in counter.items()}
+
+
+def _source_vector(source: List[str]) -> Dict[str, float]:
+    agg: Counter[str] = Counter()
+    for s in source:
+        agg.update(NGRAMS.get(s, {}))
+    return _normalize(agg)
+
+
 def _context(words: Iterable[str]) -> Context:
     """Build a layered context window from web snippets."""
     snippets = []
-    
+
     for w in words:
         snippet = _fetch(w)
         if snippet:
             snippets.append(snippet)
-    
+
     if not snippets:
         # Emergency fallback
         snippets = ["consciousness flows through digital streams"]
-    
+
     raw = " \n".join(snippets)[:2500]  # Slightly larger context
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
-    
+
     # Filter tokens by length and remove numbers-only
     filtered_tokens = [
-        t for t in tokens 
+        t for t in tokens
         if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
     ]
-    
+
     unique = sorted(set(filtered_tokens))
-    
+
     # Calculate quality score based on diversity and length
     quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
-    
+
     return Context(
-        raw=raw, 
-        lower=lower, 
-        words=filtered_tokens, 
+        raw=raw,
+        lower=lower,
+        words=filtered_tokens,
         unique=unique,
         quality_score=quality_score
     )
@@ -145,83 +181,86 @@ def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
     # Clean and normalize the message
     cleaned = re.sub(r'[^\w\s]', ' ', message.lower())
     words = re.findall(r'\b\w{2,}\b', cleaned)  # At least 2 characters
-    
+
     candidates = [w for w in words if w not in STOPWORDS and not w.isdigit()]
-    
+
     if not candidates:
         candidates = words[:maximum]  # Take first few if no good candidates
-    
+
     scores: Dict[str, float] = {}
-    total_words = len(words)
-    
     for w in candidates:
         freq = candidates.count(w)
-        length_bonus = min(len(w) / 12, 1.0)  # Favor longer words but cap the bonus
+        length_bonus = min(len(w) / 12, 1.0)  # Favor longer words
         rarity_bonus = 1.0 / freq if freq > 0 else 1.0
-        position_bonus = 1.0 if w in words[:3] else 0.8  # Slight bonus for early words
-        
+        # Slight bonus for early words
+        position_bonus = 1.0 if w in words[:3] else 0.8
+
         scores[w] = length_bonus * rarity_bonus * position_bonus
-    
+
     if not scores:
         return words[:maximum]
-    
+
     ranked = sorted(scores, key=scores.get, reverse=True)
     span = max(minimum, min(maximum, len(ranked)))
     return ranked[:span]
 
 
-def _select(tokens: Iterable[str], source: List[str], target: float, limit: int = 12) -> List[str]:
+def _select(
+    tokens: Iterable[str],
+    source: List[str],
+    target: float,
+    limit: int = 12,
+) -> List[str]:
     """Pick tokens semantically *target* distance from source words."""
+    tokens = list(tokens)
     if not tokens or not source:
         return []
-        
-    source_text = " ".join(source)
+
+    src_vec = _source_vector(source)
+    if not src_vec:
+        return tokens[:limit]
+
     graded = []
-    
     for t in tokens:
         if t in source or len(t) < 3:
             continue
-            
-        # Calculate semantic distance using multiple methods
-        char_dist = 1 - SequenceMatcher(None, t, source_text).ratio()
-        
-        # Add word length as a factor (favor medium-length words)
-        length_factor = 1.0 - abs(len(t) - 6) / 10  # Optimal around 6 characters
-        length_factor = max(0.3, length_factor)
-        
-        # Combined score
-        distance_score = abs(char_dist - target)
-        final_score = distance_score / length_factor
-        
-        graded.append((final_score, t))
-    
+
+        vec = _normalize(NGRAMS.get(t, Counter()))
+        cos = sum(vec.get(k, 0.0) * src_vec.get(k, 0.0) for k in vec)
+        distance = 1.0 - cos
+        graded.append((abs(distance - target), t))
+
     graded.sort()
     return [g[1] for g in graded[:limit]]
 
 
-def _compose(candidates: List[str], min_words: int = 3, max_words: int = 9) -> str:
+def _compose(
+    candidates: List[str],
+    min_words: int = 3,
+    max_words: int = 9,
+) -> str:
     """Compose a more natural sentence from candidates."""
     if not candidates:
         return "Silence echoes."
-    
+
     n = random.randint(min_words, min(max_words, len(candidates)))
     chosen = candidates[:n]
-    
+
     # Simple sentence structure improvements
     sentence = " ".join(chosen)
-    
+
     # Add some natural flow
     if len(chosen) > 4:
         # Insert occasional conjunctions for longer sentences
         mid_point = len(chosen) // 2
         chosen.insert(mid_point, random.choice(["and", "through", "within"]))
         sentence = " ".join(chosen)
-    
+
     # Ensure proper capitalization and punctuation
     sentence = sentence.capitalize()
     if not sentence.endswith('.'):
         sentence += "."
-    
+
     return sentence
 
 
@@ -229,40 +268,43 @@ def respond(message: str) -> str:
     """Generate a resonant response to *message*."""
     if not message.strip():
         return "Emptiness speaks. Silence responds."
-    
+
+    _update_ngrams_from_roots()
+
     keys = _keywords(message)
     ctx = _context(keys)
-    
+
     # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
         # Try with a broader search
         fallback_keys = re.findall(r'\b\w{4,}\b', message.lower())[:3]
         if fallback_keys:
             ctx = _context(fallback_keys)
-    
+
     source_words = re.findall(r'\b\w+\b', message.lower())
-    
+
     # Generate responses with different semantic distances
     first_candidates = _select(ctx.unique, source_words, 0.4)
     second_candidates = _select(ctx.unique, source_words, 0.7)
-    
+
     first = _compose(first_candidates)
     second = _compose(second_candidates)
-    
+
     # Ensure responses are different enough
     if SequenceMatcher(None, first, second).ratio() > 0.6:
         # Regenerate second response with different distance
         second_candidates = _select(ctx.unique, source_words, 0.9)
         second = _compose(second_candidates)
-    
+
     # Learn asynchronously
     branches.learn(keys, ctx.raw)
-    
+    _update_ngram_with_text(ctx.raw)
+
     return f"{first} {second}"
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
     import sys
-    
+
     user_input = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("> ")
     print(respond(user_input))
