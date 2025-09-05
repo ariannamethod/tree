@@ -341,6 +341,7 @@ def _select(
 
     src_vec = _source_vector(source)
     if not src_vec:
+        random.shuffle(tokens)
         return tokens[:limit]
 
     graded = []
@@ -366,21 +367,16 @@ def _compose(
     if not candidates:
         return "Silence echoes."
 
-    n = random.randint(min_words, min(max_words, len(candidates)))
-    chosen = candidates[:n]
+    max_n = min(max_words, len(candidates))
+    min_n = min(min_words, max_n)
+    n = random.randint(min_n, max_n)
+    chosen = random.sample(candidates, n)
 
-    # Simple sentence structure improvements
-    sentence = " ".join(chosen)
-
-    # Add some natural flow
     if len(chosen) > 4:
-        # Insert occasional conjunctions for longer sentences
         mid_point = len(chosen) // 2
         chosen.insert(mid_point, random.choice(["and", "through", "within"]))
-        sentence = " ".join(chosen)
 
-    # Ensure proper capitalization and punctuation
-    sentence = sentence.capitalize()
+    sentence = " ".join(chosen).capitalize()
     if not sentence.endswith("."):
         sentence += "."
 
