@@ -13,7 +13,9 @@ def test_message_triggers_tree_response():
     update.message.text = "hello"
 
     with patch.object(
-        ground.tree, "respond", return_value="hi"
+        ground.tree,
+        "respond",
+        return_value="hi",
     ) as mock_respond:
         ground.handle_message(update, context)
 

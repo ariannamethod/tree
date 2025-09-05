@@ -38,8 +38,10 @@ def initialize() -> None:
         db.commit()
 
 
-def prune(limit: int = MEMORY_LIMIT) -> None:
+def prune(limit: int | None = None) -> None:
     """Trim oldest rows so no more than *limit* memories remain."""
+    if limit is None:
+        limit = MEMORY_LIMIT
     with closing(sqlite3.connect(DB_PATH)) as db:
         cur = db.execute(
             "SELECT id FROM memory ORDER BY id DESC LIMIT 1 OFFSET ?", (limit,)
@@ -53,13 +55,13 @@ def prune(limit: int = MEMORY_LIMIT) -> None:
 
 def add_memory(word: str, context: str) -> None:
     """Persist a searched *word* with its *context* window."""
-    prune()
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.execute(
             "INSERT INTO memory(word, context) VALUES (?, ?)",
             (word, context[:2000]),
         )
         db.commit()
+    prune()
 
 
 def recall(limit: int = 5) -> Iterable[Tuple[str, str]]:
