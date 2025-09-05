@@ -23,17 +23,99 @@ import time
 import branches
 import roots
 
+
+# simple in-memory cache for retrieved snippets
+_FETCH_CACHE: Dict[str, str] = {}
+
 STOPWORDS = {
-    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as",
-    "is", "at", "by", "from", "or", "an", "be", "this", "that", "are",
-    "was", "but", "not", "had", "have", "has", "were", "been", "their",
-    "said", "each", "which", "she", "do", "how", "if", "will", "up",
-    "other", "about", "out", "many", "then", "them", "these", "so",
-    "some", "her", "would", "make", "like", "into", "him", "time",
-    "two", "more", "very", "when", "come", "may", "its", "only",
-    "think", "now", "people", "my", "made", "over", "did", "down",
-    "way", "find", "use", "get", "give", "work", "life", "day", "part",
-    "year", "back", "see", "know", "just", "first", "could", "any"
+    "the",
+    "and",
+    "to",
+    "a",
+    "in",
+    "it",
+    "of",
+    "for",
+    "on",
+    "with",
+    "as",
+    "is",
+    "at",
+    "by",
+    "from",
+    "or",
+    "an",
+    "be",
+    "this",
+    "that",
+    "are",
+    "was",
+    "but",
+    "not",
+    "had",
+    "have",
+    "has",
+    "were",
+    "been",
+    "their",
+    "said",
+    "each",
+    "which",
+    "she",
+    "do",
+    "how",
+    "if",
+    "will",
+    "up",
+    "other",
+    "about",
+    "out",
+    "many",
+    "then",
+    "them",
+    "these",
+    "so",
+    "some",
+    "her",
+    "would",
+    "make",
+    "like",
+    "into",
+    "him",
+    "time",
+    "two",
+    "more",
+    "very",
+    "when",
+    "come",
+    "may",
+    "its",
+    "only",
+    "think",
+    "now",
+    "people",
+    "my",
+    "made",
+    "over",
+    "did",
+    "down",
+    "way",
+    "find",
+    "use",
+    "get",
+    "give",
+    "work",
+    "life",
+    "day",
+    "part",
+    "year",
+    "back",
+    "see",
+    "know",
+    "just",
+    "first",
+    "could",
+    "any",
 }
 
 
@@ -47,12 +129,12 @@ class _Extractor(HTMLParser):
         self._in_style = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
-        if tag.lower() in ('script', 'style'):
+        if tag.lower() in ("script", "style"):
             self._in_script = True
             self._in_style = True
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in ('script', 'style'):
+        if tag.lower() in ("script", "style"):
             self._in_script = False
             self._in_style = False
 
@@ -68,7 +150,15 @@ class _Extractor(HTMLParser):
 
 
 def _fetch(word: str, retries: int = 2) -> str:
-    """Retrieve a snippet from the web for *word* with error handling."""
+    """Retrieve a snippet for *word* using cache and local memory."""
+    if word in _FETCH_CACHE:
+        return _FETCH_CACHE[word]
+
+    recalled = _recall_fragment(word)
+    if recalled:
+        _FETCH_CACHE[word] = recalled
+        return recalled
+
     user_agent = "Mozilla/5.0 (compatible; TreeEngine/1.0)"
 
     for attempt in range(retries + 1):
@@ -78,7 +168,8 @@ def _fetch(word: str, retries: int = 2) -> str:
             url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
 
             req = urllib.request.Request(
-                url, headers={'User-Agent': user_agent}
+                url,
+                headers={"User-Agent": user_agent},
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 html = resp.read().decode("utf-8", "ignore")
@@ -88,6 +179,7 @@ def _fetch(word: str, retries: int = 2) -> str:
             text = parser.text[:600]  # Slightly more text
 
             if len(text) > 50:  # Ensure we got meaningful content
+                _FETCH_CACHE[word] = text
                 return text
 
         except Exception:
@@ -95,8 +187,9 @@ def _fetch(word: str, retries: int = 2) -> str:
                 time.sleep(0.5)  # Brief pause before retry
                 continue
 
-    # Fallback: return the word itself with some context
-    return f"{word} resonates through digital space, echoing meaning"
+    fallback = f"{word} resonates through digital space, echoing meaning"
+    _FETCH_CACHE[word] = fallback
+    return fallback
 
 
 @dataclass
@@ -113,7 +206,8 @@ NGRAMS: Dict[str, Counter[str]] = defaultdict(Counter)
 
 def _update_ngram_with_text(text: str) -> None:
     tokens = [
-        t for t in re.findall(r"\w+", text.lower())
+        t
+        for t in re.findall(r"\w+", text.lower())
         if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
     ]
     for a, b in zip(tokens, tokens[1:]):
@@ -123,6 +217,34 @@ def _update_ngram_with_text(text: str) -> None:
 def _update_ngrams_from_roots(limit: int = 100) -> None:
     for _, ctx in roots.recall(limit):
         _update_ngram_with_text(ctx)
+
+
+def _hash_ngrams(text: str, n: int = 3) -> set[int]:
+    """Return a set of hashed character n-grams for *text*."""
+    text = re.sub(r"\s+", " ", text.lower())
+    if len(text) < n:
+        return set()
+    return {hash(text[i : i + n]) for i in range(len(text) - n + 1)}  # noqa: E203,E501
+
+
+def _recall_fragment(word: str, limit: int = 50) -> str | None:
+    """Find a relevant context for *word* from stored roots."""
+    target = _hash_ngrams(word)
+    if not target:
+        return None
+
+    best_score = 0.0
+    best_ctx: str | None = None
+    for _, ctx in roots.recall(limit):
+        grams = _hash_ngrams(ctx)
+        if not grams:
+            continue
+        score = len(target & grams) / len(target)
+        if score > best_score:
+            best_score, best_ctx = score, ctx
+    if best_ctx and best_score > 0.1:
+        return best_ctx[:600]
+    return None
 
 
 def _normalize(counter: Counter[str]) -> Dict[str, float]:
@@ -158,8 +280,9 @@ def _context(words: Iterable[str]) -> Context:
 
     # Filter tokens by length and remove numbers-only
     filtered_tokens = [
-        t for t in tokens
-        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+        t
+        for t in tokens
+        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS  # noqa: E501
     ]
 
     unique = sorted(set(filtered_tokens))
@@ -172,15 +295,15 @@ def _context(words: Iterable[str]) -> Context:
         lower=lower,
         words=filtered_tokens,
         unique=unique,
-        quality_score=quality_score
+        quality_score=quality_score,
     )
 
 
 def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
     """Extract charged keywords from *message* using improved heuristics."""
     # Clean and normalize the message
-    cleaned = re.sub(r'[^\w\s]', ' ', message.lower())
-    words = re.findall(r'\b\w{2,}\b', cleaned)  # At least 2 characters
+    cleaned = re.sub(r"[^\w\s]", " ", message.lower())
+    words = re.findall(r"\b\w{2,}\b", cleaned)  # At least 2 characters
 
     candidates = [w for w in words if w not in STOPWORDS and not w.isdigit()]
 
@@ -258,7 +381,7 @@ def _compose(
 
     # Ensure proper capitalization and punctuation
     sentence = sentence.capitalize()
-    if not sentence.endswith('.'):
+    if not sentence.endswith("."):
         sentence += "."
 
     return sentence
@@ -277,11 +400,11 @@ def respond(message: str) -> str:
     # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
         # Try with a broader search
-        fallback_keys = re.findall(r'\b\w{4,}\b', message.lower())[:3]
+        fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
         if fallback_keys:
             ctx = _context(fallback_keys)
 
-    source_words = re.findall(r'\b\w+\b', message.lower())
+    source_words = re.findall(r"\b\w+\b", message.lower())
 
     # Generate responses with different semantic distances
     first_candidates = _select(ctx.unique, source_words, 0.4)
