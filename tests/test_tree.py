@@ -25,7 +25,7 @@ def test_responses_evolve(monkeypatch):
         quality_score=1.0,
     )
 
-    monkeypatch.setattr(tree, "_context", lambda _: fixed_ctx)
+    monkeypatch.setattr(tree, "_context", lambda w, lang='en-us': fixed_ctx)
     monkeypatch.setattr(
         tree.branches,
         "learn",

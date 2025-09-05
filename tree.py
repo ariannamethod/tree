@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 import math
 import time
 
@@ -24,8 +24,8 @@ import branches
 import roots
 
 
-# simple in-memory cache for retrieved snippets
-_FETCH_CACHE: Dict[str, str] = {}
+# simple in-memory cache for retrieved snippets keyed by language
+_FETCH_CACHE: Dict[Tuple[str, str], str] = {}
 
 STOPWORDS = {
     "the",
@@ -119,6 +119,13 @@ STOPWORDS = {
 }
 
 
+def _detect_language(text: str) -> str:
+    """Return a DuckDuckGo ``kl`` code based on characters in *text*."""
+    if re.search(r"[А-Яа-я]", text):
+        return "ru-ru"
+    return "en-us"
+
+
 class _Extractor(HTMLParser):
     """Pull text from HTML using only the standard library."""
 
@@ -149,14 +156,15 @@ class _Extractor(HTMLParser):
         return " ".join(self._chunks)
 
 
-def _fetch(word: str, retries: int = 2) -> str:
+def _fetch(word: str, lang: str = "en-us", retries: int = 2) -> str:
     """Retrieve a snippet for *word* using cache and local memory."""
-    if word in _FETCH_CACHE:
-        return _FETCH_CACHE[word]
+    cache_key = (lang, word)
+    if cache_key in _FETCH_CACHE:
+        return _FETCH_CACHE[cache_key]
 
     recalled = _recall_fragment(word)
     if recalled:
-        _FETCH_CACHE[word] = recalled
+        _FETCH_CACHE[cache_key] = recalled
         return recalled
 
     user_agent = "Mozilla/5.0 (compatible; TreeEngine/1.0)"
@@ -165,7 +173,11 @@ def _fetch(word: str, retries: int = 2) -> str:
         try:
             # Add some randomness to avoid being blocked
             query = word if attempt == 0 else f"{word} meaning"
-            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+            url = (
+                "https://duckduckgo.com/html/?q="
+                + urllib.parse.quote(query)
+                + f"&kl={lang}"
+            )
 
             req = urllib.request.Request(
                 url,
@@ -179,7 +191,7 @@ def _fetch(word: str, retries: int = 2) -> str:
             text = parser.text[:600]  # Slightly more text
 
             if len(text) > 50:  # Ensure we got meaningful content
-                _FETCH_CACHE[word] = text
+                _FETCH_CACHE[cache_key] = text
                 return text
 
         except Exception:
@@ -188,7 +200,7 @@ def _fetch(word: str, retries: int = 2) -> str:
                 continue
 
     fallback = f"{word} resonates through digital space, echoing meaning"
-    _FETCH_CACHE[word] = fallback
+    _FETCH_CACHE[cache_key] = fallback
     return fallback
 
 
@@ -261,12 +273,12 @@ def _source_vector(source: List[str]) -> Dict[str, float]:
     return _normalize(agg)
 
 
-def _context(words: Iterable[str]) -> Context:
+def _context(words: Iterable[str], lang: str = "en-us") -> Context:
     """Build a layered context window from web snippets."""
     snippets = []
 
     for w in words:
-        snippet = _fetch(w)
+        snippet = _fetch(w, lang)
         if snippet:
             snippets.append(snippet)
 
@@ -359,27 +371,35 @@ def _select(
 
 def _compose(
     candidates: List[str],
+    source: List[str],
+    mix_ratio: float,
     min_words: int = 3,
     max_words: int = 9,
 ) -> str:
-    """Compose a more natural sentence from candidates."""
-    if not candidates:
+    """Compose a more natural sentence blending source words."""
+    if not candidates and not source:
         return "Silence echoes."
 
-    n = random.randint(min_words, min(max_words, len(candidates)))
-    chosen = candidates[:n]
+    n = random.randint(
+        min_words, min(max_words, max(len(candidates), len(source)))
+    )
+    source_count = (
+        min(len(source), max(1, int(n * mix_ratio))) if source else 0
+    )
+    cand_count = max(1, n - source_count)
 
-    # Simple sentence structure improvements
-    sentence = " ".join(chosen)
+    chosen: List[str] = []
+    if source_count:
+        chosen.extend(random.sample(source, source_count))
+    chosen.extend(candidates[:cand_count])
 
-    # Add some natural flow
+    random.shuffle(chosen)
+
     if len(chosen) > 4:
-        # Insert occasional conjunctions for longer sentences
         mid_point = len(chosen) // 2
         chosen.insert(mid_point, random.choice(["and", "through", "within"]))
-        sentence = " ".join(chosen)
 
-    # Ensure proper capitalization and punctuation
+    sentence = " ".join(chosen)
     sentence = sentence.capitalize()
     if not sentence.endswith("."):
         sentence += "."
@@ -394,34 +414,38 @@ def respond(message: str) -> str:
 
     _update_ngrams_from_roots()
 
+    lang = _detect_language(message)
     keys = _keywords(message)
-    ctx = _context(keys)
+    ctx = _context(keys, lang)
 
     # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
         # Try with a broader search
         fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
         if fallback_keys:
-            ctx = _context(fallback_keys)
+            ctx = _context(fallback_keys, lang)
 
     source_words = re.findall(r"\b\w+\b", message.lower())
+
+    mix_ratio = 0.5 - 0.2 * min(ctx.quality_score, 1.0)
 
     # Generate responses with different semantic distances
     first_candidates = _select(ctx.unique, source_words, 0.4)
     second_candidates = _select(ctx.unique, source_words, 0.7)
 
-    first = _compose(first_candidates)
-    second = _compose(second_candidates)
+    first = _compose(first_candidates, source_words, mix_ratio)
+    second = _compose(second_candidates, source_words, mix_ratio)
 
     # Ensure responses are different enough
     if SequenceMatcher(None, first, second).ratio() > 0.6:
         # Regenerate second response with different distance
         second_candidates = _select(ctx.unique, source_words, 0.9)
-        second = _compose(second_candidates)
+        second = _compose(second_candidates, source_words, mix_ratio)
 
     # Learn asynchronously
     branches.learn(keys, ctx.raw)
     _update_ngram_with_text(ctx.raw)
+    branches.wait()
 
     return f"{first} {second}"
 
