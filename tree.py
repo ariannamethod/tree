@@ -116,6 +116,7 @@ STOPWORDS = {
     "first",
     "could",
     "any",
+    "all",
 }
 
 
@@ -297,7 +298,8 @@ def _context(words: Iterable[str], lang: str = "en-us") -> Context:
         if len(t) > 2 and not t.isdigit() and t not in STOPWORDS  # noqa: E501
     ]
 
-    unique = sorted(set(filtered_tokens))
+    # Preserve the order of appearance for more organic selection
+    unique = list(dict.fromkeys(filtered_tokens))
 
     # Calculate quality score based on diversity and length
     quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
@@ -353,6 +355,7 @@ def _select(
 
     src_vec = _source_vector(source)
     if not src_vec:
+        random.shuffle(tokens)
         return tokens[:limit]
 
     graded = []
