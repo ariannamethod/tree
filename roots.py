@@ -14,6 +14,7 @@ import sqlite3
 from typing import Iterable, Tuple
 
 DB_PATH = Path("tree.sqlite")
+MEMORY_LIMIT = 1000
 
 
 def initialize() -> None:
@@ -29,11 +30,30 @@ def initialize() -> None:
             )
             """
         )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_word ON memory(word)
+            """
+        )
         db.commit()
+
+
+def prune(limit: int = MEMORY_LIMIT) -> None:
+    """Trim oldest rows so no more than *limit* memories remain."""
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        cur = db.execute(
+            "SELECT id FROM memory ORDER BY id DESC LIMIT 1 OFFSET ?", (limit,)
+        )
+        row = cur.fetchone()
+        if row:
+            cutoff_id = row[0]
+            db.execute("DELETE FROM memory WHERE id <= ?", (cutoff_id,))
+            db.commit()
 
 
 def add_memory(word: str, context: str) -> None:
     """Persist a searched *word* with its *context* window."""
+    prune()
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.execute(
             "INSERT INTO memory(word, context) VALUES (?, ?)",
