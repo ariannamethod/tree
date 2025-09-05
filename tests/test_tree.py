@@ -29,7 +29,7 @@ def test_responses_evolve(monkeypatch):
     monkeypatch.setattr(
         tree.branches,
         "learn",
-        lambda w, c: [roots.add_memory(k, c) for k in w],
+        lambda w, c: roots.add_memory(w, c),
     )
 
     random.seed(0)

@@ -120,8 +120,14 @@ def _update_ngram_with_text(text: str) -> None:
         NGRAMS[a][b] += 1
 
 
-def _update_ngrams_from_roots(limit: int = 100) -> None:
-    for _, ctx in roots.recall(limit):
+def _update_ngrams_from_roots(
+    limit: int = 100, query: Iterable[str] | None = None
+) -> None:
+    """Prime NGRAMS using stored roots, optionally filtered by *query*."""
+    memories = (
+        roots.recall_semantic(query, limit) if query else roots.recall(limit)
+    )
+    for _, ctx in memories:
         _update_ngram_with_text(ctx)
 
 
@@ -269,9 +275,8 @@ def respond(message: str) -> str:
     if not message.strip():
         return "Emptiness speaks. Silence responds."
 
-    _update_ngrams_from_roots()
-
     keys = _keywords(message)
+    _update_ngrams_from_roots(query=keys)
     ctx = _context(keys)
 
     # Fallback if context is poor quality

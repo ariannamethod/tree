@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Iterable, Tuple
+from typing import Iterable, List, Tuple
 
 import roots
 
 # Fixed number of background workers processing tasks from ``_TASKS``.
 WORKER_LIMIT = 1
-_TASKS: "queue.Queue[Tuple[Iterable[str], str]]" = queue.Queue()
+_TASKS: "queue.Queue[Tuple[List[str], str]]" = queue.Queue()
 
 
 def _worker() -> None:
@@ -24,22 +24,28 @@ def _worker() -> None:
     while True:
         words, context = _TASKS.get()
         try:
-            for w in words:
-                roots.add_memory(w, context)
+            roots.add_memory(words, context)
         finally:
             _TASKS.task_done()
 
 
 # Start the pool of worker threads on module import.
 for i in range(WORKER_LIMIT):
-    threading.Thread(target=_worker, daemon=True, name=f"branches-worker-{i}").start()
+    threading.Thread(
+        target=_worker, daemon=True, name=f"branches-worker-{i}"
+    ).start()
 
 
 def learn(words: Iterable[str], context: str) -> None:
     """Asynchronously record *words* with the given *context* window."""
 
     # Store a concrete sequence in the queue so generators remain valid.
-    _TASKS.put((list(words), context))
+    # Deduplicate while preserving order to keep storage compact.
+    seen = []
+    for w in words:
+        if w not in seen:
+            seen.append(w)
+    _TASKS.put((seen, context))
 
 
 def wait() -> None:

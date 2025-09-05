@@ -4,8 +4,11 @@ import logging
 import os
 import signal
 
-from telegram import Update
-from telegram.ext import CallbackContext, Filters, MessageHandler, Updater
+try:  # pragma: no cover - optional telegram dependency
+    from telegram import Update
+    from telegram.ext import CallbackContext, Filters, MessageHandler, Updater
+except Exception:  # pragma: no cover - used only when telegram is installed
+    Update = CallbackContext = Filters = MessageHandler = Updater = object
 
 import tree
 
