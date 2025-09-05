@@ -116,6 +116,7 @@ STOPWORDS = {
     "first",
     "could",
     "any",
+    "all",
 }
 
 
@@ -285,7 +286,7 @@ def _context(words: Iterable[str]) -> Context:
         if len(t) > 2 and not t.isdigit() and t not in STOPWORDS  # noqa: E501
     ]
 
-    unique = sorted(set(filtered_tokens))
+    unique = list(dict.fromkeys(filtered_tokens))
 
     # Calculate quality score based on diversity and length
     quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
@@ -341,7 +342,7 @@ def _select(
 
     src_vec = _source_vector(source)
     if not src_vec:
-        return tokens[:limit]
+        return random.sample(tokens, min(len(tokens), limit))
 
     graded = []
     for t in tokens:
@@ -367,17 +368,15 @@ def _compose(
         return "Silence echoes."
 
     n = random.randint(min_words, min(max_words, len(candidates)))
-    chosen = candidates[:n]
-
-    # Simple sentence structure improvements
-    sentence = " ".join(chosen)
+    chosen = random.sample(candidates, n)
 
     # Add some natural flow
     if len(chosen) > 4:
         # Insert occasional conjunctions for longer sentences
         mid_point = len(chosen) // 2
         chosen.insert(mid_point, random.choice(["and", "through", "within"]))
-        sentence = " ".join(chosen)
+
+    sentence = " ".join(chosen)
 
     # Ensure proper capitalization and punctuation
     sentence = sentence.capitalize()
