@@ -53,13 +53,13 @@ def prune(limit: int = MEMORY_LIMIT) -> None:
 
 def add_memory(word: str, context: str) -> None:
     """Persist a searched *word* with its *context* window."""
-    prune()
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.execute(
             "INSERT INTO memory(word, context) VALUES (?, ?)",
             (word, context[:2000]),
         )
         db.commit()
+    prune(MEMORY_LIMIT)
 
 
 def recall(limit: int = 5) -> Iterable[Tuple[str, str]]:

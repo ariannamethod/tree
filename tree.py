@@ -431,3 +431,4 @@ if __name__ == "__main__":  # pragma: no cover - manual exercise
 
     user_input = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("> ")
     print(respond(user_input))
+
