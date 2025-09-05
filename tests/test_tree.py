@@ -37,3 +37,24 @@ def test_responses_evolve(monkeypatch):
     random.seed(0)
     second = tree.respond("alpha beta")
     assert first != second
+
+
+def test_select_random_fallback():
+    tree.NGRAMS.clear()
+    tokens = [
+        "africa",
+        "arabia",
+        "argentina",
+        "australia",
+        "austria",
+        "belgium",
+    ]
+    random.seed(0)
+    result = tree._select(tokens, ["hello"], 0.4, limit=5)
+    assert result == [
+        "austria",
+        "argentina",
+        "arabia",
+        "africa",
+        "belgium",
+    ]
