@@ -32,7 +32,11 @@ def _worker() -> None:
 
 # Start the pool of worker threads on module import.
 for i in range(WORKER_LIMIT):
-    threading.Thread(target=_worker, daemon=True, name=f"branches-worker-{i}").start()
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"branches-worker-{i}",
+    ).start()
 
 
 def learn(words: Iterable[str], context: str) -> None:
