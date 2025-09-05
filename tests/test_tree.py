@@ -58,3 +58,23 @@ def test_select_random_fallback():
         "africa",
         "belgium",
     ]
+
+
+def test_short_query_no_recall(monkeypatch):
+    def boom(limit):  # pragma: no cover - should not be called
+        raise AssertionError(
+            "roots.recall should not be invoked for short words"
+        )
+
+    monkeypatch.setattr(roots, "recall", boom)
+    assert tree._recall_fragment("you") is None
+
+
+def test_stopword_no_recall(monkeypatch):
+    def boom(limit):  # pragma: no cover - should not be called
+        raise AssertionError(
+            "roots.recall should not be invoked for stopwords"
+        )
+
+    monkeypatch.setattr(roots, "recall", boom)
+    assert tree._recall_fragment("the") is None

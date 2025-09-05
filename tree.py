@@ -242,7 +242,11 @@ def _hash_ngrams(text: str, n: int = 3) -> set[int]:
 
 def _recall_fragment(word: str, limit: int = 50) -> str | None:
     """Find a relevant context for *word* from stored roots."""
-    target = _hash_ngrams(word)
+    word_l = word.lower()
+    if len(word_l) < 4 or word_l in STOPWORDS:
+        return None
+
+    target = _hash_ngrams(word_l)
     if not target:
         return None
 
@@ -255,7 +259,9 @@ def _recall_fragment(word: str, limit: int = 50) -> str | None:
         score = len(target & grams) / len(target)
         if score > best_score:
             best_score, best_ctx = score, ctx
-    if best_ctx and best_score > 0.1:
+
+    threshold = 0.5 if len(word_l) <= 5 else 0.1
+    if best_ctx and best_score > threshold:
         return best_ctx[:600]
     return None
 
