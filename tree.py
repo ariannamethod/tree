@@ -27,6 +27,14 @@ import roots
 # simple in-memory cache for retrieved snippets
 _FETCH_CACHE: Dict[str, str] = {}
 
+
+def _detect_language(text: str) -> str:
+    """Very small heuristic language detection."""
+    if re.search(r"[А-Яа-я]", text):
+        return "ru-ru"
+    return "en-us"
+
+
 STOPWORDS = {
     "the",
     "and",
@@ -149,7 +157,7 @@ class _Extractor(HTMLParser):
         return " ".join(self._chunks)
 
 
-def _fetch(word: str, retries: int = 2) -> str:
+def _fetch(word: str, retries: int = 2, lang: str = "en-us") -> str:
     """Retrieve a snippet for *word* using cache and local memory."""
     if word in _FETCH_CACHE:
         return _FETCH_CACHE[word]
@@ -163,28 +171,35 @@ def _fetch(word: str, retries: int = 2) -> str:
 
     for attempt in range(retries + 1):
         try:
-            # Add some randomness to avoid being blocked
             query = word if attempt == 0 else f"{word} meaning"
-            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+            url = (
+                "https://duckduckgo.com/html/?kl="
+                + urllib.parse.quote(lang)
+                + "&q="
+                + urllib.parse.quote(query)
+            )
 
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": user_agent},
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept-Language": lang,
+                },
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 html = resp.read().decode("utf-8", "ignore")
 
             parser = _Extractor()
             parser.feed(html)
-            text = parser.text[:600]  # Slightly more text
+            text = parser.text[:600]
 
-            if len(text) > 50:  # Ensure we got meaningful content
+            if len(text) > 50:
                 _FETCH_CACHE[word] = text
                 return text
 
         except Exception:
             if attempt < retries:
-                time.sleep(0.5)  # Brief pause before retry
+                time.sleep(0.5)
                 continue
 
     fallback = f"{word} resonates through digital space, echoing meaning"
@@ -264,9 +279,10 @@ def _source_vector(source: List[str]) -> Dict[str, float]:
 def _context(words: Iterable[str]) -> Context:
     """Build a layered context window from web snippets."""
     snippets = []
+    lang = _detect_language(" ".join(words))
 
     for w in words:
-        snippet = _fetch(w)
+        snippet = _fetch(w, lang=lang)
         if snippet:
             snippets.append(snippet)
 
@@ -359,27 +375,36 @@ def _select(
 
 def _compose(
     candidates: List[str],
+    user_tokens: List[str] | None = None,
+    mix_ratio: float = 0.0,
     min_words: int = 3,
     max_words: int = 9,
 ) -> str:
-    """Compose a more natural sentence from candidates."""
-    if not candidates:
+    """Compose a more natural sentence from candidates and user tokens."""
+    user_tokens = user_tokens or []
+    if not candidates and not user_tokens:
         return "Silence echoes."
 
-    n = random.randint(min_words, min(max_words, len(candidates)))
-    chosen = candidates[:n]
+    max_pool = len(candidates) + len(user_tokens)
+    n = random.randint(min_words, min(max_words, max_pool))
+    if mix_ratio > 0:
+        mix_count = min(len(user_tokens), int(n * mix_ratio))
+    else:
+        mix_count = 0
+    base_count = max(0, n - mix_count)
 
-    # Simple sentence structure improvements
+    chosen = candidates[:base_count]
+    if mix_count:
+        chosen.extend(random.sample(user_tokens, mix_count))
+    random.shuffle(chosen)
+
     sentence = " ".join(chosen)
 
-    # Add some natural flow
     if len(chosen) > 4:
-        # Insert occasional conjunctions for longer sentences
         mid_point = len(chosen) // 2
         chosen.insert(mid_point, random.choice(["and", "through", "within"]))
         sentence = " ".join(chosen)
 
-    # Ensure proper capitalization and punctuation
     sentence = sentence.capitalize()
     if not sentence.endswith("."):
         sentence += "."
@@ -397,33 +422,30 @@ def respond(message: str) -> str:
     keys = _keywords(message)
     ctx = _context(keys)
 
-    # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
-        # Try with a broader search
         fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
         if fallback_keys:
             ctx = _context(fallback_keys)
 
-    source_words = re.findall(r"\b\w+\b", message.lower())
+    user_tokens = re.findall(r"\b\w+\b", message.lower())
+    mix = 0.3 + 0.2 * min(ctx.quality_score, 1.0)
 
-    # Generate responses with different semantic distances
-    first_candidates = _select(ctx.unique, source_words, 0.4)
-    second_candidates = _select(ctx.unique, source_words, 0.7)
+    first_candidates = _select(ctx.unique, user_tokens, 0.4)
+    second_candidates = _select(ctx.unique, user_tokens, 0.7)
 
-    first = _compose(first_candidates)
-    second = _compose(second_candidates)
+    first = _compose(first_candidates, user_tokens, mix)
+    second = _compose(second_candidates, user_tokens, mix)
 
-    # Ensure responses are different enough
     if SequenceMatcher(None, first, second).ratio() > 0.6:
-        # Regenerate second response with different distance
-        second_candidates = _select(ctx.unique, source_words, 0.9)
-        second = _compose(second_candidates)
+        second_candidates = _select(ctx.unique, user_tokens, 0.9)
+        second = _compose(second_candidates, user_tokens, mix)
 
-    # Learn asynchronously
-    branches.learn(keys, ctx.raw)
-    _update_ngram_with_text(ctx.raw)
+    convo_context = f"{message}\n{first}\n{second}"
+    branches.learn(keys + user_tokens, convo_context)
+    branches.wait()
+    _update_ngram_with_text(convo_context)
 
-    return f"{first} {second}"
+    return f"{first}\n{second}"
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
