@@ -304,33 +304,60 @@ def _source_vector(source: List[str]) -> Dict[str, float]:
 
 
 def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
-    """Build conversational context window using Nicole's approach."""
+    """Build conversational context window using treesoning intelligence."""
+    # First try treesoning for smart analysis
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        context_text, confidence = loop.run_until_complete(
+            treesoning.get_treesoning_context(message)
+        )
+        loop.close()
+        
+        if confidence > 0.3 and context_text:
+            # Use treesoning result
+            raw = context_text[:2500]
+            lower = raw.lower()
+            tokens = re.findall(r"\w+", lower)
+            
+            filtered_tokens = [
+                t for t in tokens
+                if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+            ]
+            
+            unique = list(dict.fromkeys(filtered_tokens))
+            quality_score = confidence
+            
+            return Context(
+                raw=raw,
+                lower=lower,
+                words=filtered_tokens,
+                unique=unique,
+                quality_score=quality_score,
+            )
+    except Exception as e:
+        print(f"Treesoning failed: {e}, falling back to simple context")
+    
+    # Fallback to original method if treesoning fails
     snippets = []
-
     for w in words:
         snippet = _fetch_conversational(message, w, lang)
         if snippet:
             snippets.append(snippet)
 
     if not snippets:
-        # Emergency fallback with conversational tone
         snippets = [f"conversation flows naturally, connecting {' and '.join(words)} through dialogue"]
 
     raw = " \n".join(snippets)[:2500]
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
 
-    # Filter tokens by length and remove numbers-only
     filtered_tokens = [
-        t
-        for t in tokens
+        t for t in tokens
         if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
     ]
 
-    # Preserve the order of appearance for more organic selection
     unique = list(dict.fromkeys(filtered_tokens))
-
-    # Calculate quality score based on diversity and length
     quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
 
     return Context(
