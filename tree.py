@@ -4,7 +4,7 @@ from __future__ import annotations
 
 The :mod:`tree` module is a minimalist transformer inspired construct.
 It selects charged words from a user prompt, harvests tiny webs of
-context from the internet, and composes two resonant sentences that drift
+context from conversational sources, and composes two resonant sentences that drift
 semantically away from the original message.
 """
 
@@ -12,6 +12,7 @@ import random
 import re
 import urllib.parse
 import urllib.request
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -28,103 +29,23 @@ import roots
 _FETCH_CACHE: Dict[Tuple[str, str], str] = {}
 
 STOPWORDS = {
-    "the",
-    "and",
-    "to",
-    "a",
-    "in",
-    "it",
-    "of",
-    "for",
-    "on",
-    "with",
-    "as",
-    "is",
-    "at",
-    "by",
-    "from",
-    "or",
-    "an",
-    "be",
-    "this",
-    "that",
-    "are",
-    "was",
-    "but",
-    "not",
-    "had",
-    "have",
-    "has",
-    "were",
-    "been",
-    "their",
-    "said",
-    "each",
-    "which",
-    "she",
-    "do",
-    "how",
-    "if",
-    "will",
-    "up",
-    "other",
-    "about",
-    "out",
-    "many",
-    "then",
-    "them",
-    "these",
-    "so",
-    "some",
-    "her",
-    "would",
-    "make",
-    "like",
-    "into",
-    "him",
-    "time",
-    "two",
-    "more",
-    "very",
-    "when",
-    "come",
-    "may",
-    "its",
-    "only",
-    "think",
-    "now",
-    "people",
-    "my",
-    "made",
-    "over",
-    "did",
-    "down",
-    "way",
-    "find",
-    "use",
-    "get",
-    "give",
-    "work",
-    "life",
-    "day",
-    "part",
-    "year",
-    "back",
-    "see",
-    "know",
-    "just",
-    "first",
-    "could",
-    "any",
-    "all",
+    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as", "is", "at", "by", "from",
+    "or", "an", "be", "this", "that", "are", "was", "but", "not", "had", "have", "has", "were", "been",
+    "their", "said", "each", "which", "she", "do", "how", "if", "will", "up", "other", "about", "out",
+    "many", "then", "them", "these", "so", "some", "her", "would", "make", "like", "into", "him", "time",
+    "two", "more", "very", "when", "come", "may", "its", "only", "think", "now", "people", "my", "made",
+    "over", "did", "down", "way", "find", "use", "get", "give", "work", "life", "day", "part", "year",
+    "back", "see", "know", "just", "first", "could", "any", "all",
 }
+
+USER_AGENT = "Mozilla/5.0 (compatible; TreeEngine/1.0; +https://github.com/ariannamethod/tree)"
 
 
 def _detect_language(text: str) -> str:
-    """Return a DuckDuckGo ``kl`` code based on characters in *text*."""
+    """Return language code based on characters in *text*."""
     if re.search(r"[А-Яа-я]", text):
-        return "ru-ru"
-    return "en-us"
+        return "ru"
+    return "en"
 
 
 class _Extractor(HTMLParser):
@@ -149,7 +70,7 @@ class _Extractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not (self._in_script or self._in_style):
             data = data.strip()
-            if data and len(data) > 2:  # Skip very short fragments
+            if data and len(data) > 2:
                 self._chunks.append(data)
 
     @property
@@ -157,52 +78,154 @@ class _Extractor(HTMLParser):
         return " ".join(self._chunks)
 
 
-def _fetch(word: str, lang: str = "en-us", retries: int = 2) -> str:
-    """Retrieve a snippet for *word* using cache and local memory."""
-    cache_key = (lang, word)
+def _fetch_conversational(message: str, word: str, lang: str = "en", retries: int = 2) -> str:
+    """Retrieve conversational context using Nicole's approach - no DuckDuckGo!"""
+    cache_key = (lang, f"{message}:{word}")
     if cache_key in _FETCH_CACHE:
         return _FETCH_CACHE[cache_key]
 
+    # First try memory
     recalled = _recall_fragment(word)
     if recalled:
         _FETCH_CACHE[cache_key] = recalled
         return recalled
 
-    user_agent = "Mozilla/5.0 (compatible; TreeEngine/1.0)"
-
-    for attempt in range(retries + 1):
-        try:
-            # Add some randomness to avoid being blocked
-            query = word if attempt == 0 else f"{word} meaning"
-            url = (
-                "https://duckduckgo.com/html/?q="
-                + urllib.parse.quote(query)
-                + f"&kl={lang}"
-            )
-
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": user_agent},
-            )
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                html = resp.read().decode("utf-8", "ignore")
-
-            parser = _Extractor()
-            parser.feed(html)
-            text = parser.text[:600]  # Slightly more text
-
-            if len(text) > 50:  # Ensure we got meaningful content
-                _FETCH_CACHE[cache_key] = text
-                return text
-
-        except Exception:
-            if attempt < retries:
-                time.sleep(0.5)  # Brief pause before retry
-                continue
-
-    fallback = f"{word} resonates through digital space, echoing meaning"
+    # Build conversational queries like Nicole
+    results = []
+    
+    # Strategy 1: Reddit for natural responses
+    reddit_query = _build_reddit_query(message, word)
+    reddit_result = _fetch_reddit(reddit_query)
+    if reddit_result:
+        results.append(reddit_result)
+    
+    # Strategy 2: Google for conversational context (not definitions!)
+    google_query = _build_google_query(message, word)
+    google_result = _fetch_google(google_query)
+    if google_result:
+        results.append(google_result)
+    
+    # Combine results
+    if results:
+        combined = "\n\n".join(results)[:800]
+        _FETCH_CACHE[cache_key] = combined
+        return combined
+    
+    # Fallback patterns for common phrases
+    fallback = _get_fallback_pattern(message, word)
     _FETCH_CACHE[cache_key] = fallback
     return fallback
+
+
+def _build_reddit_query(message: str, word: str) -> str:
+    """Build Reddit query for conversational context."""
+    msg_lower = message.lower()
+    
+    if "how are you" in msg_lower:
+        return "how are you responses conversation reddit"
+    elif any(qw in msg_lower for qw in ["how", "what", "why", "when", "where"]):
+        return f"how to respond to {message.strip()} reddit"
+    elif word:
+        return f"talking about {word} conversation reddit"
+    else:
+        return f"response to {message.strip()} reddit"
+
+
+def _build_google_query(message: str, word: str) -> str:
+    """Build Google query for conversational context."""
+    msg_lower = message.lower()
+    
+    if "how are you" in msg_lower:
+        return "how to respond how are you conversation"
+    elif any(qw in msg_lower for qw in ["how", "what", "why"]):
+        return f"conversation about {message.strip()}"
+    else:
+        return f"talking about {word} smalltalk"
+
+
+def _fetch_reddit(query: str) -> str:
+    """Fetch from Reddit JSON API."""
+    try:
+        url = f"https://www.reddit.com/search.json?q={urllib.parse.quote(query)}&limit=3&sort=relevance"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            
+        posts = data.get("data", {}).get("children", [])
+        snippets = []
+        
+        for post in posts[:2]:
+            post_data = post.get("data", {})
+            title = post_data.get("title", "").strip()
+            selftext = post_data.get("selftext", "").strip()
+            
+            if title and len(title) > 10:
+                content = title
+                if selftext and len(selftext) > 20:
+                    content += f" - {selftext[:300]}"
+                snippets.append(content[:400])
+        
+        return " ".join(snippets) if snippets else ""
+        
+    except Exception:
+        return ""
+
+
+def _fetch_google(query: str) -> str:
+    """Simple Google search for conversational context."""
+    try:
+        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=2"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        req = urllib.request.Request(url, headers=headers)
+        
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+            
+        # Simple parsing for titles and descriptions
+        titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
+        descriptions = re.findall(r'<span[^>]*>([^<]{30,150})</span>', html)
+        
+        snippets = []
+        for i, title in enumerate(titles[:2]):
+            if title and len(title) > 5:
+                content = title
+                if i < len(descriptions) and descriptions[i]:
+                    content += f" - {descriptions[i][:200]}"
+                snippets.append(content)
+        
+        return " ".join(snippets) if snippets else ""
+        
+    except Exception:
+        return ""
+
+
+def _get_fallback_pattern(message: str, word: str) -> str:
+    """Fallback conversational patterns like Nicole."""
+    msg_lower = message.lower()
+    
+    if "how are you" in msg_lower:
+        patterns = [
+            "I'm doing great, thanks for asking! How about you?",
+            "Pretty good today, yourself?", 
+            "Not bad at all, how are things with you?",
+            "I'm fine, thank you for asking"
+        ]
+        return random.choice(patterns)
+    
+    if "hello" in msg_lower or "hi" in msg_lower:
+        return "Hello there! Nice to meet you. What brings you here today?"
+    
+    if any(tech in msg_lower for tech in ["python", "code", "programming"]):
+        return f"{word} resonates through code, building digital bridges and solving complex puzzles"
+    
+    if any(city in msg_lower for city in ["berlin", "paris", "tokyo", "london", "moscow"]):
+        return f"{word} echoes through urban streets, where culture and history interweave"
+    
+    # Generic conversational fallback
+    return f"{word} resonates through conversation, connecting thoughts and sparking dialogue"
 
 
 @dataclass
@@ -237,7 +260,7 @@ def _hash_ngrams(text: str, n: int = 3) -> set[int]:
     text = re.sub(r"\s+", " ", text.lower())
     if len(text) < n:
         return set()
-    return {hash(text[i : i + n]) for i in range(len(text) - n + 1)}  # noqa: E203,E501
+    return {hash(text[i : i + n]) for i in range(len(text) - n + 1)}
 
 
 def _recall_fragment(word: str, limit: int = 50) -> str | None:
@@ -280,20 +303,20 @@ def _source_vector(source: List[str]) -> Dict[str, float]:
     return _normalize(agg)
 
 
-def _context(words: Iterable[str], lang: str = "en-us") -> Context:
-    """Build a layered context window from web snippets."""
+def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
+    """Build conversational context window using Nicole's approach."""
     snippets = []
 
     for w in words:
-        snippet = _fetch(w, lang)
+        snippet = _fetch_conversational(message, w, lang)
         if snippet:
             snippets.append(snippet)
 
     if not snippets:
-        # Emergency fallback
-        snippets = ["consciousness flows through digital streams"]
+        # Emergency fallback with conversational tone
+        snippets = [f"conversation flows naturally, connecting {' and '.join(words)} through dialogue"]
 
-    raw = " \n".join(snippets)[:2500]  # Slightly larger context
+    raw = " \n".join(snippets)[:2500]
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
 
@@ -301,7 +324,7 @@ def _context(words: Iterable[str], lang: str = "en-us") -> Context:
     filtered_tokens = [
         t
         for t in tokens
-        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS  # noqa: E501
+        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
     ]
 
     # Preserve the order of appearance for more organic selection
@@ -323,19 +346,18 @@ def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
     """Extract charged keywords from *message* using improved heuristics."""
     # Clean and normalize the message
     cleaned = re.sub(r"[^\w\s]", " ", message.lower())
-    words = re.findall(r"\b\w{2,}\b", cleaned)  # At least 2 characters
+    words = re.findall(r"\b\w{2,}\b", cleaned)
 
     candidates = [w for w in words if w not in STOPWORDS and not w.isdigit()]
 
     if not candidates:
-        candidates = words[:maximum]  # Take first few if no good candidates
+        candidates = words[:maximum]
 
     scores: Dict[str, float] = {}
     for w in candidates:
         freq = candidates.count(w)
-        length_bonus = min(len(w) / 12, 1.0)  # Favor longer words
+        length_bonus = min(len(w) / 12, 1.0)
         rarity_bonus = 1.0 / freq if freq > 0 else 1.0
-        # Slight bonus for early words
         position_bonus = 1.0 if w in words[:3] else 0.8
 
         scores[w] = length_bonus * rarity_bonus * position_bonus
@@ -425,14 +447,14 @@ def respond(message: str) -> str:
 
     lang = _detect_language(message)
     keys = _keywords(message)
-    ctx = _context(keys, lang)
+    ctx = _context(message, keys, lang)  # Pass full message for context
 
     # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
         # Try with a broader search
         fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
         if fallback_keys:
-            ctx = _context(fallback_keys, lang)
+            ctx = _context(message, fallback_keys, lang)
 
     source_words = re.findall(r"\b\w+\b", message.lower())
 
@@ -451,7 +473,7 @@ def respond(message: str) -> str:
         second_candidates = _select(ctx.unique, source_words, 0.9)
         second = _compose(second_candidates, source_words, mix_ratio)
 
-    # Learn asynchronously
+    # Learn asynchronously - store the conversational context
     branches.learn(keys, ctx.raw)
     _update_ngram_with_text(ctx.raw)
     branches.wait()
