@@ -158,7 +158,7 @@ async def analyze_message(message: str) -> TreesoningResult:
     """Main treesoning function - analyze message and build intelligent queries."""
     words = re.findall(r'\b\w+\b', message)
     if not words:
-        return TreesoningResult([], "conversation flows naturally", 0.0)
+        return TreesoningResult([], "", 0.0)
     
     # Analyze each word
     branches = []
@@ -201,7 +201,7 @@ async def analyze_message(message: str) -> TreesoningResult:
     
     if proper_nouns:
         final_query = f"what it means {inverted_message} and how to respond"
-    elif any("how" in message.lower(), "what" in message.lower(), "why" in message.lower()):
+    elif any(qw in message.lower() for qw in ["how", "what", "why"]):
         final_query = f"how to answer {inverted_message}"
     else:
         final_query = f"conversation about {inverted_message}"
@@ -221,7 +221,7 @@ def _build_combined_context(result: TreesoningResult, branch_contexts: List[str]
     valid_contexts = [ctx for ctx in branch_contexts if ctx.strip()]
     
     if not valid_contexts:
-        return "conversation flows through natural dialogue"
+        return ""
     
     # Limit each context and combine
     limited_contexts = [ctx[:200] for ctx in valid_contexts]
@@ -237,7 +237,7 @@ async def get_treesoning_context(message: str) -> Tuple[str, float]:
     result = await analyze_message(message)
     
     if not result.branches:
-        return "conversation flows naturally through dialogue", 0.1
+        return "", 0.0
     
     # Fetch context for final query
     try:
@@ -247,9 +247,8 @@ async def get_treesoning_context(message: str) -> Tuple[str, float]:
     except Exception:
         pass
     
-    # Fallback
-    fallback = f"conversation about {message.strip()}"
-    return fallback, 0.2
+    # No fallback - return empty
+    return "", 0.0
 
 # For testing
 if __name__ == "__main__":

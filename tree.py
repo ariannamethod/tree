@@ -20,7 +20,6 @@ from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Tuple
 import math
-import time
 
 import branches
 import roots
@@ -113,10 +112,9 @@ def _fetch_conversational(message: str, word: str, lang: str = "en", retries: in
         _FETCH_CACHE[cache_key] = combined
         return combined
     
-    # Fallback patterns for common phrases
-    fallback = _get_fallback_pattern(message, word)
-    _FETCH_CACHE[cache_key] = fallback
-    return fallback
+    # Return empty string if no results found
+    _FETCH_CACHE[cache_key] = ""
+    return ""
 
 
 def _build_reddit_query(message: str, word: str) -> str:
@@ -204,30 +202,7 @@ def _fetch_google(query: str) -> str:
         return ""
 
 
-def _get_fallback_pattern(message: str, word: str) -> str:
-    """Fallback conversational patterns like Nicole."""
-    msg_lower = message.lower()
-    
-    if "how are you" in msg_lower:
-        patterns = [
-            "I'm doing great, thanks for asking! How about you?",
-            "Pretty good today, yourself?", 
-            "Not bad at all, how are things with you?",
-            "I'm fine, thank you for asking"
-        ]
-        return random.choice(patterns)
-    
-    if "hello" in msg_lower or "hi" in msg_lower:
-        return "Hello there! Nice to meet you. What brings you here today?"
-    
-    if any(tech in msg_lower for tech in ["python", "code", "programming"]):
-        return f"{word} resonates through code, building digital bridges and solving complex puzzles"
-    
-    if any(city in msg_lower for city in ["berlin", "paris", "tokyo", "london", "moscow"]):
-        return f"{word} echoes through urban streets, where culture and history interweave"
-    
-    # Generic conversational fallback
-    return f"{word} resonates through conversation, connecting thoughts and sparking dialogue"
+
 
 
 @dataclass
@@ -348,19 +323,25 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
             snippets.append(snippet)
 
     if not snippets:
-        snippets = [f"conversation flows naturally, connecting {' and '.join(words)} through dialogue"]
+        # No fallback template - just use empty context
+        raw = ""
+        lower = ""
+        tokens = []
+        filtered_tokens = []
+        unique = []
+        quality_score = 0.0
+    else:
+        raw = " \n".join(snippets)[:2500]
+        lower = raw.lower()
+        tokens = re.findall(r"\w+", lower)
 
-    raw = " \n".join(snippets)[:2500]
-    lower = raw.lower()
-    tokens = re.findall(r"\w+", lower)
+        filtered_tokens = [
+            t for t in tokens
+            if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+        ]
 
-    filtered_tokens = [
-        t for t in tokens
-        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
-    ]
-
-    unique = list(dict.fromkeys(filtered_tokens))
-    quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
+        unique = list(dict.fromkeys(filtered_tokens))
+        quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
 
     return Context(
         raw=raw,
@@ -438,26 +419,40 @@ def _compose(
 ) -> str:
     """Compose a more natural sentence blending source words."""
     if not candidates and not source:
-        return "Silence echoes."
+        return ""
+    
+    # Calculate available words
+    available_words = len(candidates) + len(source)
+    if available_words == 0:
+        return ""
+    
+    # Ensure we don't try to select more words than available
+    max_possible = min(max_words, available_words)
+    min_possible = min(min_words, max_possible)
+    
+    if min_possible > max_possible:
+        return ""
 
-    n = random.randint(
-        min_words, min(max_words, max(len(candidates), len(source)))
-    )
+    n = random.randint(min_possible, max_possible)
     source_count = (
         min(len(source), max(1, int(n * mix_ratio))) if source else 0
     )
-    cand_count = max(1, n - source_count)
+    cand_count = max(0, n - source_count)
+    
+    # Ensure we don't exceed available words
+    source_count = min(source_count, len(source))
+    cand_count = min(cand_count, len(candidates))
 
     chosen: List[str] = []
-    if source_count:
+    if source_count > 0:
         chosen.extend(random.sample(source, source_count))
-    chosen.extend(candidates[:cand_count])
+    if cand_count > 0:
+        chosen.extend(candidates[:cand_count])
+
+    if not chosen:
+        return ""
 
     random.shuffle(chosen)
-
-    if len(chosen) > 4:
-        mid_point = len(chosen) // 2
-        chosen.insert(mid_point, random.choice(["and", "through", "within"]))
 
     sentence = " ".join(chosen)
     sentence = sentence.capitalize()
@@ -470,7 +465,7 @@ def _compose(
 def respond(message: str) -> str:
     """Generate a resonant response to *message*."""
     if not message.strip():
-        return "Emptiness speaks. Silence responds."
+        return ""
 
     _update_ngrams_from_roots()
 
@@ -493,21 +488,26 @@ def respond(message: str) -> str:
     first_candidates = _select(ctx.unique, source_words, 0.4)
     second_candidates = _select(ctx.unique, source_words, 0.7)
 
-    first = _compose(first_candidates, source_words, mix_ratio)
-    second = _compose(second_candidates, source_words, mix_ratio)
+    # Only use source words if we have meaningful context
+    use_source_words = source_words if ctx.quality_score > 0.1 and ctx.unique else []
+
+    first = _compose(first_candidates, use_source_words, mix_ratio)
+    second = _compose(second_candidates, use_source_words, mix_ratio)
 
     # Ensure responses are different enough
     if SequenceMatcher(None, first, second).ratio() > 0.6:
         # Regenerate second response with different distance
-        second_candidates = _select(ctx.unique, source_words, 0.9)
-        second = _compose(second_candidates, source_words, mix_ratio)
+        second_candidates = _select(ctx.unique, use_source_words, 0.9)
+        second = _compose(second_candidates, use_source_words, mix_ratio)
 
     # Learn asynchronously - store the conversational context
     branches.learn(keys, ctx.raw)
     _update_ngram_with_text(ctx.raw)
     branches.wait()
 
-    return f"{first} {second}"
+    # Combine responses, filtering out empty ones
+    results = [resp for resp in [first, second] if resp.strip()]
+    return " ".join(results)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
