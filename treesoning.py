@@ -85,50 +85,46 @@ def _build_branch_query(word: str, word_type: str) -> str:
             if root.endswith(ending) and len(root) > len(ending) + 2:
                 root = root[:-len(ending)]
                 break
-        return f"what does {root} mean"
+        # Use "how to {root}" but fallback to "{root} meaning" if root is too short
+        if len(root) >= 3:
+            return f"how to {root}"
+        else:
+            return f"{root} meaning"
+    elif word_type == "pronoun":
+        # Queries that reflect perspective shift
+        inverted = PRONOUN_MAP.get(word.lower())
+        if inverted:
+            return f"about {inverted}"
+        else:
+            return "about you"
     elif word_type == "content":
-        return f"conversation about {word}"
+        return f"about {word.lower()}"
     else:
-        return f"{word} meaning"
+        # Default fallback
+        return word.lower()
 
 async def _fetch_branch_context(query: str) -> str:
     """Fetch context for a single branch query."""
     try:
-        # Try Reddit first for conversational context
-        reddit_url = f"https://www.reddit.com/search.json?q={urllib.parse.quote(query)}&limit=2&sort=relevance"
-        req = urllib.request.Request(reddit_url, headers={"User-Agent": USER_AGENT})
-        
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            
-        posts = data.get("data", {}).get("children", [])
-        snippets = []
-        
-        for post in posts[:1]:  # Just one result per branch
-            post_data = post.get("data", {})
-            title = post_data.get("title", "").strip()
-            if title and len(title) > 10:
-                snippets.append(title[:200])
-        
-        if snippets:
-            return " ".join(snippets)
-            
-    except Exception:
-        pass
-    
-    # Fallback: simple Google search
-    try:
-        google_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=1"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        req = urllib.request.Request(google_url, headers=headers)
+        # Use DuckDuckGo HTML search as specified
+        ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
         
         with urllib.request.urlopen(req, timeout=8) as resp:
-            html = resp.read().decode("utf-8", "ignore")
-            
-        # Extract first meaningful snippet
-        titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
-        if titles and len(titles[0]) > 5:
-            return titles[0][:150]
+            html = resp.read().decode("utf-8", errors="ignore")
+        
+        # Extract text from HTML using simple regex-based approach
+        # Remove script and style content
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Extract visible text using regex
+        text_content = re.sub(r'<[^>]+>', ' ', html)
+        text_content = re.sub(r'\s+', ' ', text_content).strip()
+        
+        # Return first 500-800 chars of visible text as specified
+        if text_content and len(text_content) > 50:
+            return text_content[:800]
             
     except Exception:
         pass
@@ -203,7 +199,7 @@ async def analyze_message(message: str) -> TreesoningResult:
     
     if proper_nouns:
         final_query = f"what it means {inverted_message} and how to respond"
-    elif any("how" in message.lower(), "what" in message.lower(), "why" in message.lower()):
+    elif any(x in message.lower() for x in ("how", "what", "why")):
         final_query = f"how to answer {inverted_message}"
     else:
         final_query = f"conversation about {inverted_message}"

@@ -8,6 +8,7 @@ context from conversational sources, and composes two resonant sentences that dr
 semantically away from the original message.
 """
 
+import asyncio
 import random
 import re
 import urllib.parse
@@ -23,6 +24,7 @@ import time
 
 import branches
 import roots
+import treesoning
 
 
 # simple in-memory cache for retrieved snippets keyed by language
