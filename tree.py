@@ -9,8 +9,10 @@ semantically away from the original message.
 """
 
 import asyncio
+import html
 import random
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 import json
@@ -48,6 +50,48 @@ def _detect_language(text: str) -> str:
     if re.search(r"[А-Яа-я]", text):
         return "ru"
     return "en"
+
+
+def _sanitize_visible(text: str) -> str:
+    """Strip invisible/control characters and HTML artifacts from text.
+    
+    - HTML-unescapes text
+    - Applies Unicode NFKC normalization
+    - Removes invisible/control/format/surrogate/private-use code points
+      (categories: Cc/Cf/Cs/Co/Cn)
+    - Converts Unicode space separators (Zs) to standard space (U+0020)
+    - Collapses runs of whitespace to a single space
+    - Preserves all punctuation (P*), letters/marks/numbers across all languages
+    """
+    if not text:
+        return ""
+
+    # HTML-unescape the text
+    text = html.unescape(text)
+
+    # Apply Unicode NFKC normalization
+    text = unicodedata.normalize('NFKC', text)
+
+    # Filter out invisible/control/format/surrogate/private-use code points
+    # Keep only visible characters: letters (L*), marks (M*), numbers (N*),
+    # punctuation (P*), symbols (S*), and spaces (Zs->U+0020)
+    filtered_chars = []
+    for char in text:
+        category = unicodedata.category(char)
+        if category.startswith('C'):  # Control/Other categories - remove these
+            continue
+        elif category == 'Zs':  # Space separator - convert to standard space
+            filtered_chars.append(' ')
+        else:  # Keep all other visible characters (L*, M*, N*, P*, S*, Zl, Zp)
+            filtered_chars.append(char)
+
+    text = ''.join(filtered_chars)
+
+    # Collapse runs of whitespace to a single space
+    text = re.sub(r'\s+', ' ', text)
+
+    # Strip leading/trailing whitespace
+    return text.strip()
 
 
 class _Extractor(HTMLParser):
@@ -166,9 +210,14 @@ def _fetch_reddit(query: str) -> str:
                 content = title
                 if selftext and len(selftext) > 20:
                     content += f" - {selftext[:300]}"
-                snippets.append(content[:400])
+                # Sanitize each snippet before appending
+                sanitized_content = _sanitize_visible(content[:400])
+                if sanitized_content:
+                    snippets.append(sanitized_content)
         
-        return " ".join(snippets) if snippets else ""
+        # Sanitize the final joined string before return
+        result = " ".join(snippets) if snippets else ""
+        return _sanitize_visible(result)
         
     except Exception:
         return ""
@@ -193,12 +242,20 @@ def _fetch_google(query: str) -> str:
         snippets = []
         for i, title in enumerate(titles[:2]):
             if title and len(title) > 5:
-                content = title
-                if i < len(descriptions) and descriptions[i]:
-                    content += f" - {descriptions[i][:200]}"
-                snippets.append(content)
+                # Sanitize title before composing
+                sanitized_title = _sanitize_visible(title)
+                if sanitized_title:
+                    content = sanitized_title
+                    if i < len(descriptions) and descriptions[i]:
+                        # Sanitize description before composing
+                        sanitized_desc = _sanitize_visible(descriptions[i][:200])
+                        if sanitized_desc:
+                            content += f" - {sanitized_desc}"
+                    snippets.append(content)
         
-        return " ".join(snippets) if snippets else ""
+        # Sanitize the final joined string before return
+        result = " ".join(snippets) if snippets else ""
+        return _sanitize_visible(result)
         
     except Exception:
         return ""
@@ -317,8 +374,8 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
         loop.close()
         
         if confidence > 0.3 and context_text:
-            # Use treesoning result
-            raw = context_text[:2500]
+            # Use treesoning result - sanitize context_text before tokenization and truncation
+            raw = _sanitize_visible(context_text)[:2500]
             lower = raw.lower()
             tokens = re.findall(r"\w+", lower)
             
@@ -507,7 +564,8 @@ def respond(message: str) -> str:
     _update_ngram_with_text(ctx.raw)
     branches.wait()
 
-    return f"{first} {second}"
+    # Sanitize the final response before returning
+    return _sanitize_visible(f"{first} {second}")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
