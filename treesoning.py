@@ -1,5 +1,3 @@
-
-
 """treesoning.py - Grammar-aware context builder for tree engine
 
 Builds intelligent search queries by analyzing grammatical structure:
