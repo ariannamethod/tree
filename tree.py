@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Tuple
 import math
+import time
 
 import branches
 import roots
@@ -302,11 +303,45 @@ def _source_vector(source: List[str]) -> Dict[str, float]:
     return _normalize(agg)
 
 
-def _context(words: Iterable[str], lang: str = "en") -> Context:
-    """Build conversational context window for a given list of *words*."""
+def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
+    """Build conversational context window using treesoning intelligence."""
+    # First try treesoning for smart analysis
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        context_text, confidence = loop.run_until_complete(
+            treesoning.get_treesoning_context(message)
+        )
+        loop.close()
+        
+        if confidence > 0.3 and context_text:
+            # Use treesoning result
+            raw = context_text[:2500]
+            lower = raw.lower()
+            tokens = re.findall(r"\w+", lower)
+            
+            filtered_tokens = [
+                t for t in tokens
+                if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+            ]
+            
+            unique = list(dict.fromkeys(filtered_tokens))
+            quality_score = confidence
+            
+            return Context(
+                raw=raw,
+                lower=lower,
+                words=filtered_tokens,
+                unique=unique,
+                quality_score=quality_score,
+            )
+    except Exception as e:
+        print(f"Treesoning failed: {e}, falling back to simple context")
+    
+    # Fallback to original method if treesoning fails
     snippets = []
     for w in words:
-        snippet = _fetch_conversational("", w, lang)  # Empty message for original behavior
+        snippet = _fetch_conversational(message, w, lang)
         if snippet:
             snippets.append(snippet)
 
@@ -439,14 +474,14 @@ def respond(message: str) -> str:
 
     lang = _detect_language(message)
     keys = _keywords(message)
-    ctx = _context(keys, lang)
+    ctx = _context(message, keys, lang)  # Pass full message for context
 
     # Fallback if context is poor quality
     if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
         # Try with a broader search
         fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
         if fallback_keys:
-            ctx = _context(fallback_keys, lang)
+            ctx = _context(message, fallback_keys, lang)
 
     source_words = re.findall(r"\b\w+\b", message.lower())
 
