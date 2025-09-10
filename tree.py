@@ -20,24 +20,109 @@ from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Tuple
 import math
-import time
+import hashlib
 
 import branches
 import roots
 import treesoning
 
 
+# Micro-interjections for true empties and cold start
+MICRO_INTERJECTIONS = ["Huh?", "Hmmm…", "…"]
+
 # simple in-memory cache for retrieved snippets keyed by language
 _FETCH_CACHE: Dict[Tuple[str, str], str] = {}
 
 STOPWORDS = {
-    "the", "and", "to", "a", "in", "it", "of", "for", "on", "with", "as", "is", "at", "by", "from",
-    "or", "an", "be", "this", "that", "are", "was", "but", "not", "had", "have", "has", "were", "been",
-    "their", "said", "each", "which", "she", "do", "how", "if", "will", "up", "other", "about", "out",
-    "many", "then", "them", "these", "so", "some", "her", "would", "make", "like", "into", "him", "time",
-    "two", "more", "very", "when", "come", "may", "its", "only", "think", "now", "people", "my", "made",
-    "over", "did", "down", "way", "find", "use", "get", "give", "work", "life", "day", "part", "year",
-    "back", "see", "know", "just", "first", "could", "any", "all",
+    "the",
+    "and",
+    "to",
+    "a",
+    "in",
+    "it",
+    "of",
+    "for",
+    "on",
+    "with",
+    "as",
+    "is",
+    "at",
+    "by",
+    "from",
+    "or",
+    "an",
+    "be",
+    "this",
+    "that",
+    "are",
+    "was",
+    "but",
+    "not",
+    "had",
+    "have",
+    "has",
+    "were",
+    "been",
+    "their",
+    "said",
+    "each",
+    "which",
+    "she",
+    "do",
+    "how",
+    "if",
+    "will",
+    "up",
+    "other",
+    "about",
+    "out",
+    "many",
+    "then",
+    "them",
+    "these",
+    "so",
+    "some",
+    "her",
+    "would",
+    "make",
+    "like",
+    "into",
+    "him",
+    "time",
+    "two",
+    "more",
+    "very",
+    "when",
+    "come",
+    "may",
+    "its",
+    "only",
+    "think",
+    "now",
+    "people",
+    "my",
+    "made",
+    "over",
+    "did",
+    "down",
+    "way",
+    "find",
+    "use",
+    "get",
+    "give",
+    "work",
+    "life",
+    "day",
+    "part",
+    "year",
+    "back",
+    "see",
+    "know",
+    "just",
+    "first",
+    "could",
+    "any",
+    "all",
 }
 
 USER_AGENT = "Mozilla/5.0 (compatible; TreeEngine/1.0; +https://github.com/ariannamethod/tree)"
@@ -48,6 +133,48 @@ def _detect_language(text: str) -> str:
     if re.search(r"[А-Яа-я]", text):
         return "ru"
     return "en"
+
+
+def _get_micro_interjection(message: str) -> str:
+    """Get deterministic micro-interjection for message."""
+    normalized = re.sub(r"\s+", " ", message.lower().strip())
+    if not normalized:
+        normalized = "empty"
+
+    # Deterministic selection based on message hash
+    hash_digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    idx = int(hash_digest[:8], 16) % len(MICRO_INTERJECTIONS)
+    return MICRO_INTERJECTIONS[idx]
+
+
+def _is_context_usable_for_output(context: "Context") -> bool:
+    """Check if context meets minimum threshold for generating output."""
+    if not context or not context.raw:
+        return False
+
+    # Must have at least 24 chars after sanitization
+    clean_text = context.raw.strip()
+    if len(clean_text) < 24:
+        return False
+
+    # Must have at least 3 non-stopword tokens with len >= 3
+    tokens = [t for t in context.unique if len(t) >= 3 and t not in STOPWORDS]
+    return len(tokens) >= 3
+
+
+def _is_context_usable_for_training(context: "Context") -> bool:
+    """Check if context meets minimum threshold for training/learning."""
+    if not context or not context.raw:
+        return False
+
+    # Must have at least 60 chars
+    clean_text = context.raw.strip()
+    if len(clean_text) < 60:
+        return False
+
+    # Must have at least 5 non-stopword tokens with len >= 3
+    tokens = [t for t in context.unique if len(t) >= 3 and t not in STOPWORDS]
+    return len(tokens) >= 5
 
 
 class _Extractor(HTMLParser):
@@ -94,25 +221,25 @@ def _fetch_conversational(message: str, word: str, lang: str = "en", retries: in
 
     # Build conversational queries like Nicole
     results = []
-    
+
     # Strategy 1: Reddit for natural responses
     reddit_query = _build_reddit_query(message, word)
     reddit_result = _fetch_reddit(reddit_query)
     if reddit_result:
         results.append(reddit_result)
-    
+
     # Strategy 2: Google for conversational context (not definitions!)
     google_query = _build_google_query(message, word)
     google_result = _fetch_google(google_query)
     if google_result:
         results.append(google_result)
-    
+
     # Combine results
     if results:
         combined = "\n\n".join(results)[:800]
         _FETCH_CACHE[cache_key] = combined
         return combined
-    
+
     # Fallback patterns for common phrases
     fallback = _get_fallback_pattern(message, word)
     _FETCH_CACHE[cache_key] = fallback
@@ -120,56 +247,51 @@ def _fetch_conversational(message: str, word: str, lang: str = "en", retries: in
 
 
 def _build_reddit_query(message: str, word: str) -> str:
-    """Build Reddit query for conversational context."""
-    msg_lower = message.lower()
-    
-    if "how are you" in msg_lower:
-        return "how are you responses conversation reddit"
-    elif any(qw in msg_lower for qw in ["how", "what", "why", "when", "where"]):
-        return f"how to respond to {message.strip()} reddit"
-    elif word:
-        return f"talking about {word} conversation reddit"
+    """Build language-agnostic Reddit query."""
+    # Use structural search with quotes and key terms
+    if word:
+        return f'"{word}" AND "{message.strip()}"'
     else:
-        return f"response to {message.strip()} reddit"
+        return f'"{message.strip()}"'
 
 
 def _build_google_query(message: str, word: str) -> str:
-    """Build Google query for conversational context."""
-    msg_lower = message.lower()
-    
-    if "how are you" in msg_lower:
-        return "how to respond how are you conversation"
-    elif any(qw in msg_lower for qw in ["how", "what", "why"]):
-        return f"conversation about {message.strip()}"
+    """Build language-agnostic Google query."""
+    # Use structural search approach
+    if word:
+        return f'"{word}" AND "{message.strip()}"'
     else:
-        return f"talking about {word} smalltalk"
+        return f'"{message.strip()}"'
 
 
 def _fetch_reddit(query: str) -> str:
     """Fetch from Reddit JSON API."""
     try:
-        url = f"https://www.reddit.com/search.json?q={urllib.parse.quote(query)}&limit=3&sort=relevance"
+        url = (
+            f"https://www.reddit.com/search.json?q={urllib.parse.quote(query)}"
+            "&limit=3&sort=relevance"
+        )
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        
+
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            
+
         posts = data.get("data", {}).get("children", [])
         snippets = []
-        
+
         for post in posts[:2]:
             post_data = post.get("data", {})
             title = post_data.get("title", "").strip()
             selftext = post_data.get("selftext", "").strip()
-            
+
             if title and len(title) > 10:
                 content = title
                 if selftext and len(selftext) > 20:
                     content += f" - {selftext[:300]}"
                 snippets.append(content[:400])
-        
+
         return " ".join(snippets) if snippets else ""
-        
+
     except Exception:
         return ""
 
@@ -178,18 +300,16 @@ def _fetch_google(query: str) -> str:
     """Simple Google search for conversational context."""
     try:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=2"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         req = urllib.request.Request(url, headers=headers)
-        
+
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", "ignore")
-            
+
         # Simple parsing for titles and descriptions
-        titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
-        descriptions = re.findall(r'<span[^>]*>([^<]{30,150})</span>', html)
-        
+        titles = re.findall(r"<h3[^>]*>([^<]+)</h3>", html)
+        descriptions = re.findall(r"<span[^>]*>([^<]{30,150})</span>", html)
+
         snippets = []
         for i, title in enumerate(titles[:2]):
             if title and len(title) > 5:
@@ -197,37 +317,16 @@ def _fetch_google(query: str) -> str:
                 if i < len(descriptions) and descriptions[i]:
                     content += f" - {descriptions[i][:200]}"
                 snippets.append(content)
-        
+
         return " ".join(snippets) if snippets else ""
-        
+
     except Exception:
         return ""
 
 
 def _get_fallback_pattern(message: str, word: str) -> str:
-    """Fallback conversational patterns like Nicole."""
-    msg_lower = message.lower()
-    
-    if "how are you" in msg_lower:
-        patterns = [
-            "I'm doing great, thanks for asking! How about you?",
-            "Pretty good today, yourself?", 
-            "Not bad at all, how are things with you?",
-            "I'm fine, thank you for asking"
-        ]
-        return random.choice(patterns)
-    
-    if "hello" in msg_lower or "hi" in msg_lower:
-        return "Hello there! Nice to meet you. What brings you here today?"
-    
-    if any(tech in msg_lower for tech in ["python", "code", "programming"]):
-        return f"{word} resonates through code, building digital bridges and solving complex puzzles"
-    
-    if any(city in msg_lower for city in ["berlin", "paris", "tokyo", "london", "moscow"]):
-        return f"{word} echoes through urban streets, where culture and history interweave"
-    
-    # Generic conversational fallback
-    return f"{word} resonates through conversation, connecting thoughts and sparking dialogue"
+    """Return empty string - fallbacks now handled by micro-interjections."""
+    return ""
 
 
 @dataclass
@@ -263,6 +362,58 @@ def _hash_ngrams(text: str, n: int = 3) -> set[int]:
     if len(text) < n:
         return set()
     return {hash(text[i : i + n]) for i in range(len(text) - n + 1)}
+
+
+def _context_from_memory(message: str) -> Context | None:
+    """Try to build context from roots memory."""
+    # Extract keys: tokens with len>=3 not in STOPWORDS
+    tokens = re.findall(r"\b\w{3,}\b", message.lower())
+    keys = [t for t in tokens if t not in STOPWORDS]
+
+    if not keys:
+        return None
+
+    # Try to recall fragments for each key
+    fragments = []
+    for key in keys[:3]:  # Limit to first 3 keys
+        fragment = _recall_fragment(key)
+        if fragment:
+            fragments.append(fragment)
+
+    if not fragments:
+        # Expand keys via local NGRAMS proximity and try again
+        expanded_keys = []
+        for key in keys[:2]:  # Try fewer keys for expansion
+            if key in NGRAMS:
+                # Get top related words
+                related = NGRAMS[key].most_common(3)
+                expanded_keys.extend([word for word, _ in related])
+
+        for key in expanded_keys[:3]:
+            fragment = _recall_fragment(key)
+            if fragment:
+                fragments.append(fragment)
+
+    if not fragments:
+        return None
+
+    # Aggregate and deduplicate fragments
+    raw = " ".join(set(fragments))[:800]  # Deduplicate and limit
+    lower = raw.lower()
+    tokens = re.findall(r"\w+", lower)
+
+    filtered_tokens = [t for t in tokens if len(t) > 2 and not t.isdigit() and t not in STOPWORDS]
+
+    unique = list(dict.fromkeys(filtered_tokens))
+    quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
+
+    return Context(
+        raw=raw,
+        lower=lower,
+        words=filtered_tokens,
+        unique=unique,
+        quality_score=quality_score,
+    )
 
 
 def _recall_fragment(word: str, limit: int = 50) -> str | None:
@@ -315,21 +466,20 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
             treesoning.get_treesoning_context(message)
         )
         loop.close()
-        
+
         if confidence > 0.3 and context_text:
             # Use treesoning result
             raw = context_text[:2500]
             lower = raw.lower()
             tokens = re.findall(r"\w+", lower)
-            
+
             filtered_tokens = [
-                t for t in tokens
-                if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
+                t for t in tokens if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
             ]
-            
+
             unique = list(dict.fromkeys(filtered_tokens))
             quality_score = confidence
-            
+
             return Context(
                 raw=raw,
                 lower=lower,
@@ -339,7 +489,7 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
             )
     except Exception as e:
         print(f"Treesoning failed: {e}, falling back to simple context")
-    
+
     # Fallback to original method if treesoning fails
     snippets = []
     for w in words:
@@ -348,16 +498,14 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
             snippets.append(snippet)
 
     if not snippets:
-        snippets = [f"conversation flows naturally, connecting {' and '.join(words)} through dialogue"]
+        # Return empty context instead of language-bound template
+        return Context(raw="", lower="", words=[], unique=[], quality_score=0.0)
 
     raw = " \n".join(snippets)[:2500]
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
 
-    filtered_tokens = [
-        t for t in tokens
-        if len(t) > 2 and not t.isdigit() and t not in STOPWORDS
-    ]
+    filtered_tokens = [t for t in tokens if len(t) > 2 and not t.isdigit() and t not in STOPWORDS]
 
     unique = list(dict.fromkeys(filtered_tokens))
     quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
@@ -438,14 +586,10 @@ def _compose(
 ) -> str:
     """Compose a more natural sentence blending source words."""
     if not candidates and not source:
-        return "Silence echoes."
+        return ""  # Return empty for fallback chain handling
 
-    n = random.randint(
-        min_words, min(max_words, max(len(candidates), len(source)))
-    )
-    source_count = (
-        min(len(source), max(1, int(n * mix_ratio))) if source else 0
-    )
+    n = random.randint(min_words, min(max_words, max(len(candidates), len(source))))
+    source_count = min(len(source), max(1, int(n * mix_ratio))) if source else 0
     cand_count = max(1, n - source_count)
 
     chosen: List[str] = []
@@ -455,9 +599,10 @@ def _compose(
 
     random.shuffle(chosen)
 
-    if len(chosen) > 4:
-        mid_point = len(chosen) // 2
-        chosen.insert(mid_point, random.choice(["and", "through", "within"]))
+    # Remove the English function words insertion
+    # if len(chosen) > 4:
+    #     mid_point = len(chosen) // 2
+    #     chosen.insert(mid_point, random.choice(["and", "through", "within"]))
 
     sentence = " ".join(chosen)
     sentence = sentence.capitalize()
@@ -470,23 +615,27 @@ def _compose(
 def respond(message: str) -> str:
     """Generate a resonant response to *message*."""
     if not message.strip():
-        return "Emptiness speaks. Silence responds."
+        return _get_micro_interjection(message)
 
     _update_ngrams_from_roots()
 
     lang = _detect_language(message)
     keys = _keywords(message)
-    ctx = _context(message, keys, lang)  # Pass full message for context
 
-    # Fallback if context is poor quality
-    if ctx.quality_score < 0.1 or len(ctx.unique) < 3:
-        # Try with a broader search
-        fallback_keys = re.findall(r"\b\w{4,}\b", message.lower())[:3]
-        if fallback_keys:
-            ctx = _context(message, fallback_keys, lang)
+    # Step 1: Try normal provider/context building
+    ctx = _context(message, keys, lang)
+
+    # Step 2: If context is empty/low-quality, attempt memory recall from roots
+    if not _is_context_usable_for_output(ctx):
+        memory_ctx = _context_from_memory(message)
+        if memory_ctx and _is_context_usable_for_output(memory_ctx):
+            ctx = memory_ctx
+
+    # Step 3: If still empty or too short, return micro-interjection
+    if not _is_context_usable_for_output(ctx):
+        return _get_micro_interjection(message)
 
     source_words = re.findall(r"\b\w+\b", message.lower())
-
     mix_ratio = 0.5 - 0.2 * min(ctx.quality_score, 1.0)
 
     # Generate responses with different semantic distances
@@ -496,18 +645,34 @@ def respond(message: str) -> str:
     first = _compose(first_candidates, source_words, mix_ratio)
     second = _compose(second_candidates, source_words, mix_ratio)
 
-    # Ensure responses are different enough
-    if SequenceMatcher(None, first, second).ratio() > 0.6:
+    # Handle empty compositions
+    if not first and not second:
+        return _get_micro_interjection(message)
+    elif not first:
+        first = second
+        second = ""
+    elif not second:
+        second = ""
+
+    # Ensure responses are different enough if both exist
+    if first and second and SequenceMatcher(None, first, second).ratio() > 0.6:
         # Regenerate second response with different distance
         second_candidates = _select(ctx.unique, source_words, 0.9)
         second = _compose(second_candidates, source_words, mix_ratio)
 
-    # Learn asynchronously - store the conversational context
-    branches.learn(keys, ctx.raw)
-    _update_ngram_with_text(ctx.raw)
-    branches.wait()
+    # Learning guard: only learn when context passes training threshold
+    if _is_context_usable_for_training(ctx):
+        branches.learn(keys, ctx.raw)
+        _update_ngram_with_text(ctx.raw)
+        branches.wait()
 
-    return f"{first} {second}"
+    # Return composed response
+    if first and second:
+        return f"{first} {second}"
+    elif first:
+        return first
+    else:
+        return _get_micro_interjection(message)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise

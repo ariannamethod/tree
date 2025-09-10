@@ -15,17 +15,17 @@ def test_responses_evolve(monkeypatch):
         roots.initialize()
     tree.NGRAMS.clear()
 
-    context_text = "alpha beta gamma alpha delta beta theta beta"
+    context_text = "alpha beta gamma alpha delta beta theta beta epsilon zeta eta lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega all unique words"
     words = context_text.lower().split()
     fixed_ctx = tree.Context(
         raw=context_text,
         lower=context_text.lower(),
         words=words,
-        unique=["gamma", "theta", "delta"],
+        unique=["gamma", "theta", "delta", "epsilon", "zeta", "eta", "lambda", "unique"],
         quality_score=1.0,
     )
 
-    monkeypatch.setattr(tree, "_context", lambda w, lang='en-us': fixed_ctx)
+    monkeypatch.setattr(tree, "_context", lambda msg, w, lang='en': fixed_ctx)
     monkeypatch.setattr(
         tree.branches,
         "learn",
