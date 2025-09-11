@@ -205,6 +205,77 @@ def _detect_language(text: str) -> str:
     return "en"
 
 
+def _detect_entity_phrases(message: str) -> List[str]:
+    """Detect entity-like phrases using stdlib-only heuristics.
+
+    Returns list of entity phrases like ["Donald Trump", "New York", "IBM"].
+    Detects:
+    - Proper-case multiword sequences: consecutive Capitalized tokens
+    - ALL-CAPS short tokens (2-6 chars): acronyms like IBM, GPT-5
+    - Unicode-aware for Latin/Cyrillic scripts
+    """
+    if not message.strip():
+        return []
+
+    entities = []
+
+    # Split into tokens while preserving spaces for phrase reconstruction
+    tokens = re.findall(r"\S+", message)
+
+    # Pattern 1: ALL-CAPS short tokens (2-6 chars, may include numbers/hyphens)
+    for token in tokens:
+        # Remove punctuation from edges for checking
+        clean_token = re.sub(r"^[^\w]+|[^\w]+$", "", token)
+        if len(clean_token) >= 2 and len(clean_token) <= 6:
+            # Must be mostly uppercase letters (allow numbers, hyphens)
+            if re.match(r"^[A-Z]+(?:[0-9-][A-Z]*)*$", clean_token):
+                entities.append(clean_token)
+
+    # Pattern 2: Proper-case multiword sequences
+    # Find sequences of consecutive capitalized words
+    i = 0
+    while i < len(tokens):
+        # Look for capitalized word (unicode-aware)
+        token = re.sub(r"^[^\w]+|[^\w]+$", "", tokens[i])  # Clean punctuation
+        if len(token) >= 2 and token[0].isupper():
+            # Check if it's a Latin or Cyrillic letter
+            first_char = token[0]
+            if (first_char >= "A" and first_char <= "Z") or (
+                first_char >= "А" and first_char <= "Я"
+            ):
+                # Start of potential multi-word entity
+                phrase_tokens = [token]
+                j = i + 1
+
+                # Look for consecutive capitalized tokens
+                while j < len(tokens):
+                    next_token = re.sub(r"^[^\w]+|[^\w]+$", "", tokens[j])
+                    if (
+                        len(next_token) >= 2
+                        and next_token[0].isupper()
+                        and (
+                            (next_token[0] >= "A" and next_token[0] <= "Z")
+                            or (next_token[0] >= "А" and next_token[0] <= "Я")
+                        )
+                    ):
+                        phrase_tokens.append(next_token)
+                        j += 1
+                    else:
+                        break
+
+                # Only add multi-word phrases (2+ words)
+                if len(phrase_tokens) >= 2:
+                    entities.append(" ".join(phrase_tokens))
+
+                i = j  # Continue from where we left off
+            else:
+                i += 1
+        else:
+            i += 1
+
+    return entities
+
+
 def _get_micro_interjection(message: str) -> str:
     """Get deterministic micro-interjection for message."""
     normalized = re.sub(r"\s+", " ", message.lower().strip())
@@ -439,11 +510,14 @@ def _hash_ngrams(text: str, n: int = 3) -> set[int]:
     text = re.sub(r"\s+", " ", text.lower())
     if len(text) < n:
         return set()
-    return {hash(text[i : i + n]) for i in range(len(text) - n + 1)}
+    return {hash(text[i: i + n]) for i in range(len(text) - n + 1)}
 
 
 def _context_from_memory(message: str) -> Context | None:
-    """Try to build context from roots memory."""
+    """Try to build context from roots memory, prioritizing entity-relevant fragments."""
+    # Detect entity phrases for relevance filtering
+    entity_phrases = _detect_entity_phrases(message)
+
     # Extract keys: tokens with len>=3 not in STOPWORDS
     tokens = re.findall(r"\b\w{3,}\b", message.lower())
     keys = [t for t in tokens if t not in STOPWORDS]
@@ -451,14 +525,24 @@ def _context_from_memory(message: str) -> Context | None:
     if not keys:
         return None
 
-    # Try to recall fragments for each key
+    # Try to recall fragments for each key, with entity relevance scoring
     fragments = []
+    entity_fragments = []  # Prioritized fragments containing entity phrases
+
     for key in keys[:3]:  # Limit to first 3 keys
         fragment = _recall_fragment(key)
         if fragment:
-            fragments.append(fragment)
+            # Check if fragment contains any entity phrase
+            contains_entity = any(entity.lower() in fragment.lower() for entity in entity_phrases)
+            if contains_entity:
+                entity_fragments.append(fragment)
+            else:
+                fragments.append(fragment)
 
-    if not fragments:
+    # Prioritize entity-relevant fragments
+    prioritized_fragments = entity_fragments + fragments
+
+    if not prioritized_fragments:
         # Expand keys via local NGRAMS proximity and try again
         expanded_keys = []
         for key in keys[:2]:  # Try fewer keys for expansion
@@ -470,20 +554,33 @@ def _context_from_memory(message: str) -> Context | None:
         for key in expanded_keys[:3]:
             fragment = _recall_fragment(key)
             if fragment:
-                fragments.append(fragment)
+                # Again check for entity relevance
+                contains_entity = any(
+                    entity.lower() in fragment.lower() for entity in entity_phrases
+                )
+                if contains_entity:
+                    entity_fragments.append(fragment)
+                else:
+                    fragments.append(fragment)
 
-    if not fragments:
+        prioritized_fragments = entity_fragments + fragments
+
+    if not prioritized_fragments:
         return None
 
-    # Aggregate and deduplicate fragments
-    raw = " ".join(set(fragments))[:800]  # Deduplicate and limit
+    # Aggregate and deduplicate fragments, using prioritized list
+    raw = " ".join(set(prioritized_fragments))[:800]  # Deduplicate and limit
     lower = raw.lower()
     tokens = re.findall(r"\w+", lower)
 
     filtered_tokens = [t for t in tokens if len(t) > 2 and not t.isdigit() and t not in STOPWORDS]
 
     unique = list(dict.fromkeys(filtered_tokens))
-    quality_score = len(unique) / max(len(tokens), 1) if tokens else 0
+
+    # Boost quality score if entity phrases are present in memory
+    base_quality = len(unique) / max(len(tokens), 1) if tokens else 0
+    entity_boost = 0.2 if entity_fragments else 0  # Boost quality for entity-relevant memories
+    quality_score = min(1.0, base_quality + entity_boost)
 
     return Context(
         raw=raw,
@@ -598,8 +695,11 @@ def _context(message: str, words: Iterable[str], lang: str = "en") -> Context:
 
 
 def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
-    """Extract charged keywords from *message* using improved heuristics."""
-    # Clean and normalize the message
+    """Extract charged keywords from *message* with entity phrase locking."""
+    # First, detect and prioritize entity phrases
+    entity_phrases = _detect_entity_phrases(message)
+
+    # Clean and normalize the message for regular keyword extraction
     cleaned = re.sub(r"[^\w\s]", " ", message.lower())
     words = re.findall(r"\b\w{2,}\b", cleaned)
 
@@ -618,11 +718,37 @@ def _keywords(message: str, minimum: int = 3, maximum: int = 7) -> List[str]:
         scores[w] = length_bonus * rarity_bonus * position_bonus
 
     if not scores:
-        return words[:maximum]
+        regular_keywords = words[:maximum]
+    else:
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        span = max(minimum, min(maximum, len(ranked)))
+        regular_keywords = ranked[:span]
 
-    ranked = sorted(scores, key=scores.get, reverse=True)
-    span = max(minimum, min(maximum, len(ranked)))
-    return ranked[:span]
+    # Combine entity phrases with regular keywords, prioritizing entities
+    result = []
+
+    # Add entity phrases first (these are locked and prioritized)
+    for entity in entity_phrases:
+        result.append(entity)
+
+    # Add regular keywords up to the limit, avoiding duplicates
+    for keyword in regular_keywords:
+        if len(result) >= maximum:
+            break
+        # Avoid adding keywords that are already part of entity phrases
+        if not any(keyword.lower() in entity.lower() for entity in entity_phrases):
+            result.append(keyword)
+
+    # Ensure we meet minimum requirements
+    if len(result) < minimum:
+        # Add more regular keywords if needed
+        for word in words:
+            if len(result) >= maximum:
+                break
+            if word not in result and word not in STOPWORDS:
+                result.append(word)
+
+    return result[:maximum]
 
 
 def _select(
@@ -736,7 +862,10 @@ def _compose(
     context_tokens: List[str] = None,
     memory_tokens: List[str] = None,
 ) -> str:
-    """Compose a more natural sentence blending source words with filtering and anti-repetition."""
+    """Compose a more natural sentence blending source words with filtering and anti-repetition.
+
+    Now includes entity phrase locking to preserve named entities intact.
+    """
     if context_tokens is None:
         context_tokens = []
     if memory_tokens is None:
@@ -748,37 +877,58 @@ def _compose(
     # Extract user input tokens
     user_tokens = re.findall(r"\b\w+\b", user_message.lower()) if user_message else []
 
+    # Detect entity phrases for preservation
+    entity_phrases = _detect_entity_phrases(user_message) if user_message else []
+
     # Apply source-gated filtering
     filtered_candidates = _filter_source_gated_tokens(
         candidates, user_tokens, context_tokens, memory_tokens
     )
 
     # If all candidates were filtered out, return empty for fallback
-    if not filtered_candidates and not source:
+    if not filtered_candidates and not source and not entity_phrases:
         return ""
 
-    # Choose target length
-    n = random.randint(min_words, min(max_words, max(len(filtered_candidates), len(source))))
+    # Determine safe diversification - enable only with sufficient sources
+    total_candidate_pool = len(filtered_candidates) + len(source)
+    safe_diversification = total_candidate_pool >= 8  # Minimum pool size for diversification
+
+    # Choose target length, accounting for entity phrases
+    base_max = max(len(filtered_candidates), len(source))
+    adjusted_max_words = max(max_words, base_max) if base_max > 0 else max_words
+    base_n = random.randint(min_words, min(adjusted_max_words, max(min_words, base_max)))
+    # Reserve space for entity phrases
+    entity_space = min(len(entity_phrases), 2)  # Limit entity phrases to prevent domination
+    n = max(base_n, entity_space + 1)  # Ensure room for at least one other token
+
     source_count = min(len(source), max(1, int(n * mix_ratio))) if source else 0
-    cand_count = max(1, n - source_count) if filtered_candidates else 0
+    cand_count = max(1, n - source_count - entity_space) if filtered_candidates else 0
 
     # Prepare tokens with source tracking for diversification
     available_tokens: List[TokenWithSource] = []
+
+    # Add entity phrases first (highest priority)
+    for entity in entity_phrases[:entity_space]:
+        available_tokens.append(TokenWithSource(entity, "entity_phrase"))
 
     # Add source tokens (from user input)
     if source_count > 0 and source:
         source_sample = random.sample(source, source_count)
         for token in source_sample:
-            available_tokens.append(TokenWithSource(token, "input"))
+            # Skip tokens that are part of entity phrases
+            if not any(token.lower() in entity.lower() for entity in entity_phrases):
+                available_tokens.append(TokenWithSource(token, "input"))
 
     # Add candidate tokens (from context/memory)
     if cand_count > 0 and filtered_candidates:
         # Simple sampling for now - can be enhanced to prefer certain sources
         cand_sample = filtered_candidates[:cand_count]
         for token in cand_sample:
-            # Determine source type - simplified for now
-            source_type = "context"  # Can be enhanced with more detailed tracking
-            available_tokens.append(TokenWithSource(token, source_type))
+            # Skip tokens that are part of entity phrases
+            if not any(token.lower() in entity.lower() for entity in entity_phrases):
+                # Determine source type - simplified for now
+                source_type = "context"  # Can be enhanced with more detailed tracking
+                available_tokens.append(TokenWithSource(token, source_type))
 
     if not available_tokens:
         return ""
@@ -787,23 +937,35 @@ def _compose(
     chosen_tokens: List[str] = []
     source_counts: Dict[str, int] = {}
 
-    random.shuffle(available_tokens)
+    # Prioritize entity phrases first, then shuffle others
+    entity_tokens = [t for t in available_tokens if t.source == "entity_phrase"]
+    other_tokens = [t for t in available_tokens if t.source != "entity_phrase"]
+    random.shuffle(other_tokens)
 
-    for token_with_source in available_tokens:
+    # Combine with entity phrases first
+    prioritized_tokens = entity_tokens + other_tokens
+
+    for token_with_source in prioritized_tokens:
         token = token_with_source.token
         source_type = token_with_source.source
 
-        # Check repetition rules
+        # Entity phrases are always included (they're pre-validated)
+        if source_type == "entity_phrase":
+            chosen_tokens.append(token)
+            source_counts[source_type] = source_counts.get(source_type, 0) + 1
+            continue
+
+        # Check repetition rules for non-entity tokens
         if not _check_repetition_rules(chosen_tokens, token):
             continue
 
-        # Check bigram rule
+        # Check bigram rule for non-entity tokens
         if not _check_bigram_rule(chosen_tokens, token):
             continue
 
-        # Check diversification quota (40% max from single source)
+        # Check diversification quota (40% max from single source) - but only if safe
         total_tokens = len(chosen_tokens)
-        if total_tokens > 0:
+        if safe_diversification and total_tokens > 0:
             source_count = source_counts.get(source_type, 0)
             if source_count / total_tokens >= 0.4 and len(source_counts) > 1:
                 continue
