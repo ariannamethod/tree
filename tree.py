@@ -127,6 +127,52 @@ STOPWORDS = {
 
 USER_AGENT = "Mozilla/5.0 (compatible; TreeEngine/1.0; +https://github.com/ariannamethod/tree)"
 
+# Denylist for problematic filler tokens
+DENYLIST_TOKENS = {"arrangement", "deal", "around", "base"}
+
+
+def _is_question(message: str) -> bool:
+    """Detect if message is a question based on markers."""
+    # Check for explicit question mark
+    if "?" in message:
+        return True
+    
+    # Check for interrogative words (English and some Russian)
+    message_lower = message.lower()
+    interrogative_words = {
+        # English
+        "who", "what", "when", "where", "why", "how", "which", "whose",
+        "will", "can", "could", "would", "should", "is", "are", "do", "does", "did",
+        # Russian  
+        "кто", "что", "как", "почему", "зачем", "где", "когда", "какой", "чей"
+    }
+    
+    words = re.findall(r"\b\w+\b", message_lower)
+    if words and words[0] in interrogative_words:
+        return True
+    
+    return False
+
+
+def _normalize_token(token: str) -> str:
+    """Normalize token for comparison (lowercase, basic cleanup)."""
+    return token.lower().strip()
+
+
+def _unicode_capitalize(text: str) -> str:
+    """Unicode-aware capitalization of first letter."""
+    if not text:
+        return text
+    
+    # Find first alphabetic character and capitalize it
+    result = list(text)
+    for i, char in enumerate(result):
+        if char.isalpha():
+            result[i] = char.upper()
+            break
+    
+    return "".join(result)
+
 
 def _detect_language(text: str) -> str:
     """Return language code based on characters in *text*."""
@@ -336,6 +382,13 @@ class Context:
     words: List[str]
     unique: List[str]
     quality_score: float = 0.0
+
+
+@dataclass
+class TokenWithSource:
+    """Token with its source information for diversification tracking."""
+    token: str
+    source: str  # "input", "memory_fragment_N", "snippet"
 
 
 NGRAMS: Dict[str, Counter[str]] = defaultdict(Counter)
@@ -577,38 +630,189 @@ def _select(
     return [g[1] for g in graded[:limit]]
 
 
+def _filter_source_gated_tokens(
+    candidates: List[str], 
+    user_tokens: List[str], 
+    context_tokens: List[str],
+    memory_tokens: List[str]
+) -> List[str]:
+    """Filter candidates to only include tokens from valid sources, applying denylist."""
+    # Collect all allowed tokens from sources
+    allowed_tokens = set()
+    
+    # Add tokens from all valid sources (normalized for comparison)
+    for token in user_tokens:
+        allowed_tokens.add(_normalize_token(token))
+    for token in context_tokens:
+        allowed_tokens.add(_normalize_token(token))
+    for token in memory_tokens:
+        allowed_tokens.add(_normalize_token(token))
+    
+    # Filter candidates
+    filtered = []
+    for candidate in candidates:
+        normalized = _normalize_token(candidate)
+        
+        # Check denylist - if token is denylisted, only allow if in sources
+        if normalized in DENYLIST_TOKENS:
+            if normalized in allowed_tokens:
+                filtered.append(candidate)
+            # else: skip denylisted token not in sources
+        else:
+            # Non-denylisted token - only allow if from valid sources
+            if normalized in allowed_tokens:
+                filtered.append(candidate)
+    
+    return filtered
+
+
+def _check_repetition_rules(tokens: List[str], candidate: str) -> bool:
+    """Check if adding candidate would violate repetition rules."""
+    normalized_candidate = _normalize_token(candidate)
+    
+    # Count current occurrences
+    count = sum(1 for token in tokens if _normalize_token(token) == normalized_candidate)
+    
+    # Rule 1: No more than 2 occurrences total
+    if count >= 2:
+        return False
+    
+    # Rule 2: No immediate duplicates
+    if tokens and _normalize_token(tokens[-1]) == normalized_candidate:
+        return False
+    
+    return True
+
+
+def _check_bigram_rule(tokens: List[str], candidate: str) -> bool:
+    """Check if adding candidate would create a repeated bigram."""
+    if len(tokens) < 1:
+        return True
+    
+    # Form the potential new bigram
+    new_bigram = (_normalize_token(tokens[-1]), _normalize_token(candidate))
+    
+    # Check if this bigram already exists in the token sequence
+    for i in range(len(tokens) - 1):
+        existing_bigram = (_normalize_token(tokens[i]), _normalize_token(tokens[i + 1]))
+        if existing_bigram == new_bigram:
+            return False
+    
+    return True
+
+
 def _compose(
     candidates: List[str],
     source: List[str],
     mix_ratio: float,
     min_words: int = 3,
     max_words: int = 9,
+    user_message: str = "",
+    context_tokens: List[str] = None,
+    memory_tokens: List[str] = None,
 ) -> str:
-    """Compose a more natural sentence blending source words."""
+    """Compose a more natural sentence blending source words with filtering and anti-repetition."""
+    if context_tokens is None:
+        context_tokens = []
+    if memory_tokens is None:
+        memory_tokens = []
+    
     if not candidates and not source:
         return ""  # Return empty for fallback chain handling
 
-    n = random.randint(min_words, min(max_words, max(len(candidates), len(source))))
+    # Extract user input tokens
+    user_tokens = re.findall(r"\b\w+\b", user_message.lower()) if user_message else []
+    
+    # Apply source-gated filtering
+    filtered_candidates = _filter_source_gated_tokens(
+        candidates, user_tokens, context_tokens, memory_tokens
+    )
+    
+    # If all candidates were filtered out, return empty for fallback
+    if not filtered_candidates and not source:
+        return ""
+    
+    # Choose target length
+    n = random.randint(min_words, min(max_words, max(len(filtered_candidates), len(source))))
     source_count = min(len(source), max(1, int(n * mix_ratio))) if source else 0
-    cand_count = max(1, n - source_count)
-
-    chosen: List[str] = []
-    if source_count:
-        chosen.extend(random.sample(source, source_count))
-    chosen.extend(candidates[:cand_count])
-
-    random.shuffle(chosen)
-
-    # Remove the English function words insertion
-    # if len(chosen) > 4:
-    #     mid_point = len(chosen) // 2
-    #     chosen.insert(mid_point, random.choice(["and", "through", "within"]))
-
-    sentence = " ".join(chosen)
-    sentence = sentence.capitalize()
-    if not sentence.endswith("."):
-        sentence += "."
-
+    cand_count = max(1, n - source_count) if filtered_candidates else 0
+    
+    # Prepare tokens with source tracking for diversification
+    available_tokens: List[TokenWithSource] = []
+    
+    # Add source tokens (from user input)
+    if source_count > 0 and source:
+        source_sample = random.sample(source, source_count)
+        for token in source_sample:
+            available_tokens.append(TokenWithSource(token, "input"))
+    
+    # Add candidate tokens (from context/memory)
+    if cand_count > 0 and filtered_candidates:
+        # Simple sampling for now - can be enhanced to prefer certain sources
+        cand_sample = filtered_candidates[:cand_count]
+        for token in cand_sample:
+            # Determine source type - simplified for now
+            source_type = "context"  # Can be enhanced with more detailed tracking
+            available_tokens.append(TokenWithSource(token, source_type))
+    
+    if not available_tokens:
+        return ""
+    
+    # Now build the sentence with anti-repetition and diversification
+    chosen_tokens: List[str] = []
+    source_counts: Dict[str, int] = {}
+    
+    random.shuffle(available_tokens)
+    
+    for token_with_source in available_tokens:
+        token = token_with_source.token
+        source_type = token_with_source.source
+        
+        # Check repetition rules
+        if not _check_repetition_rules(chosen_tokens, token):
+            continue
+            
+        # Check bigram rule
+        if not _check_bigram_rule(chosen_tokens, token):
+            continue
+        
+        # Check diversification quota (40% max from single source)
+        total_tokens = len(chosen_tokens)
+        if total_tokens > 0:
+            source_count = source_counts.get(source_type, 0)
+            if source_count / total_tokens >= 0.4 and len(source_counts) > 1:
+                continue
+        
+        # Token passed all checks - add it
+        chosen_tokens.append(token)
+        source_counts[source_type] = source_counts.get(source_type, 0) + 1
+        
+        # Stop if we have enough tokens
+        if len(chosen_tokens) >= n:
+            break
+    
+    if not chosen_tokens:
+        return ""
+    
+    # Join tokens and apply sentence finishing rules
+    sentence = " ".join(chosen_tokens)
+    
+    # Apply unicode-aware capitalization
+    sentence = _unicode_capitalize(sentence)
+    
+    # Determine appropriate ending punctuation
+    is_question_msg = _is_question(user_message) if user_message else False
+    
+    if is_question_msg:
+        if not sentence.endswith("?"):
+            sentence += "?"
+    else:
+        if not sentence.endswith("."):
+            sentence += "."
+    
+    # Ensure no double punctuation
+    sentence = re.sub(r"[.?]+$", "?" if is_question_msg else ".", sentence)
+    
     return sentence
 
 
@@ -638,12 +842,35 @@ def respond(message: str) -> str:
     source_words = re.findall(r"\b\w+\b", message.lower())
     mix_ratio = 0.5 - 0.2 * min(ctx.quality_score, 1.0)
 
+    # Prepare context and memory tokens for source tracking
+    context_tokens = ctx.unique if ctx else []
+    memory_tokens = []
+    
+    # If we used memory context, extract memory tokens
+    memory_ctx = _context_from_memory(message)
+    if memory_ctx:
+        memory_tokens = memory_ctx.unique
+
     # Generate responses with different semantic distances
     first_candidates = _select(ctx.unique, source_words, 0.4)
     second_candidates = _select(ctx.unique, source_words, 0.7)
 
-    first = _compose(first_candidates, source_words, mix_ratio)
-    second = _compose(second_candidates, source_words, mix_ratio)
+    first = _compose(
+        first_candidates, 
+        source_words, 
+        mix_ratio,
+        user_message=message,
+        context_tokens=context_tokens,
+        memory_tokens=memory_tokens
+    )
+    second = _compose(
+        second_candidates, 
+        source_words, 
+        mix_ratio,
+        user_message=message,
+        context_tokens=context_tokens,
+        memory_tokens=memory_tokens
+    )
 
     # Handle empty compositions
     if not first and not second:
@@ -658,7 +885,14 @@ def respond(message: str) -> str:
     if first and second and SequenceMatcher(None, first, second).ratio() > 0.6:
         # Regenerate second response with different distance
         second_candidates = _select(ctx.unique, source_words, 0.9)
-        second = _compose(second_candidates, source_words, mix_ratio)
+        second = _compose(
+            second_candidates, 
+            source_words, 
+            mix_ratio,
+            user_message=message,
+            context_tokens=context_tokens,
+            memory_tokens=memory_tokens
+        )
 
     # Learning guard: only learn when context passes training threshold
     if _is_context_usable_for_training(ctx):
