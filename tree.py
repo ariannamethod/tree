@@ -9,6 +9,7 @@ semantically away from the original message.
 """
 
 import asyncio
+import logging
 import random
 import re
 import urllib.parse
@@ -25,6 +26,11 @@ import hashlib
 import branches
 import roots
 import treesoning
+import ner
+import treembedding
+
+# Set up logging for debugging entity detection and candidate selection
+logger = logging.getLogger(__name__)
 
 
 # Micro-interjections for true empties and cold start
@@ -634,13 +640,19 @@ def _select(
 ) -> List[str]:
     """Pick tokens semantically *target* distance from source words."""
     tokens = list(tokens)
+    logger.debug(f"_select: input pool size={len(tokens)}, target distance={target:.2f}, limit={limit}")
+    
     if not tokens or not source:
+        logger.debug("_select: empty tokens or source, returning empty")
         return []
 
     src_vec = _source_vector(source)
     if not src_vec:
+        logger.debug("_select: no source vector, returning random selection")
         random.shuffle(tokens)
-        return tokens[:limit]
+        result = tokens[:limit]
+        logger.debug(f"_select: random selection returned {len(result)} tokens")
+        return result
 
     graded = []
     for t in tokens:
@@ -653,7 +665,9 @@ def _select(
         graded.append((abs(distance - target), t))
 
     graded.sort()
-    return [g[1] for g in graded[:limit]]
+    result = [g[1] for g in graded[:limit]]
+    logger.debug(f"_select: graded {len(graded)} tokens, returning {len(result)} tokens")
+    return result
 
 
 def _filter_source_gated_tokens(
@@ -663,6 +677,9 @@ def _filter_source_gated_tokens(
     memory_tokens: List[str],
 ) -> List[str]:
     """Filter candidates to only include tokens from valid sources, applying denylist."""
+    logger.debug(f"_filter_source_gated_tokens: filtering {len(candidates)} candidates")
+    logger.debug(f"Source tokens - user: {len(user_tokens)}, context: {len(context_tokens)}, memory: {len(memory_tokens)}")
+    
     # Collect all allowed tokens from sources
     allowed_tokens = set()
 
@@ -674,8 +691,13 @@ def _filter_source_gated_tokens(
     for token in memory_tokens:
         allowed_tokens.add(_normalize_token(token))
 
+    logger.debug(f"Total allowed tokens from sources: {len(allowed_tokens)}")
+
     # Filter candidates
     filtered = []
+    denied_count = 0
+    not_in_sources_count = 0
+    
     for candidate in candidates:
         normalized = _normalize_token(candidate)
 
@@ -683,12 +705,21 @@ def _filter_source_gated_tokens(
         if normalized in DENYLIST_TOKENS:
             if normalized in allowed_tokens:
                 filtered.append(candidate)
+            else:
+                denied_count += 1
             # else: skip denylisted token not in sources
         else:
             # Non-denylisted token - only allow if from valid sources
             if normalized in allowed_tokens:
                 filtered.append(candidate)
+            else:
+                not_in_sources_count += 1
 
+    logger.debug(f"Filtering results - kept: {len(filtered)}, denied: {denied_count}, not in sources: {not_in_sources_count}")
+    
+    if len(filtered) < len(candidates) * 0.1:  # If we filtered out more than 90%
+        logger.debug("FALLBACK WARNING: POOL_TOO_SMALL after filtering")
+    
     return filtered
 
 
@@ -844,29 +875,50 @@ def _compose(
 
 def respond(message: str) -> str:
     """Generate a resonant response to *message*."""
+    logger.debug(f"=== RESPOND START ===")
+    logger.debug(f"Input text: '{message}'")
+    
     if not message.strip():
+        logger.debug("Empty input - returning micro-interjection")
         return _get_micro_interjection(message)
 
     _update_ngrams_from_roots()
 
+    # Detect entities using NER system
+    tokens, detected_entities = ner.detect_entities(message)
+    logger.debug(f"Detected entities: {list(detected_entities)}")
+    logger.debug(f"Tokenized input: {tokens}")
+    
+    # Update treembedding system with input sequence
+    treembedding.embedding_system.update_sequence(tokens)
+
     lang = _detect_language(message)
     keys = _keywords(message)
+    logger.debug(f"Language: {lang}, Keywords: {keys}")
 
     # Step 1: Try normal provider/context building
     ctx = _context(message, keys, lang)
+    logger.debug(f"Initial context quality score: {ctx.quality_score if ctx else 0}")
+    logger.debug(f"Initial candidate pool size: {len(ctx.unique) if ctx else 0}")
 
     # Step 2: If context is empty/low-quality, attempt memory recall from roots
     if not _is_context_usable_for_output(ctx):
+        logger.debug("Context not usable for output - attempting memory recall")
         memory_ctx = _context_from_memory(message)
         if memory_ctx and _is_context_usable_for_output(memory_ctx):
+            logger.debug(f"Memory context found - quality: {memory_ctx.quality_score}, candidates: {len(memory_ctx.unique)}")
             ctx = memory_ctx
+        else:
+            logger.debug("Memory context not available or not usable")
 
     # Step 3: If still empty or too short, return micro-interjection
     if not _is_context_usable_for_output(ctx):
+        logger.debug("FALLBACK TRIGGERED: NO_VALID_CONTEXT - returning micro-interjection")
         return _get_micro_interjection(message)
 
     source_words = re.findall(r"\b\w+\b", message.lower())
     mix_ratio = 0.5 - 0.2 * min(ctx.quality_score, 1.0)
+    logger.debug(f"Source words from input: {len(source_words)}, Mix ratio: {mix_ratio:.2f}")
 
     # Prepare context and memory tokens for source tracking
     context_tokens = ctx.unique if ctx else []
@@ -877,9 +929,27 @@ def respond(message: str) -> str:
     if memory_ctx:
         memory_tokens = memory_ctx.unique
 
+    # Preserve entities in context tokens for atomic handling
+    if detected_entities:
+        context_tokens = ner.preserve_entities_in_tokens(context_tokens, detected_entities)
+        logger.debug(f"Context tokens after entity preservation: {len(context_tokens)}")
+
     # Generate responses with different semantic distances
     first_candidates = _select(ctx.unique, source_words, 0.4)
     second_candidates = _select(ctx.unique, source_words, 0.7)
+    
+    logger.debug(f"First candidates pool size: {len(first_candidates)}")
+    logger.debug(f"Second candidates pool size: {len(second_candidates)}")
+
+    # Use treembedding to enhance candidate selection
+    if first_candidates and source_words:
+        first_candidates = treembedding.embedding_system.suggest_next(
+            source_words[-1] if source_words else "", first_candidates
+        )
+    if second_candidates and source_words:
+        second_candidates = treembedding.embedding_system.suggest_next(
+            source_words[-1] if source_words else "", second_candidates
+        )
 
     first = _compose(
         first_candidates,
@@ -897,20 +967,28 @@ def respond(message: str) -> str:
         context_tokens=context_tokens,
         memory_tokens=memory_tokens,
     )
+    
+    logger.debug(f"Generated first response: '{first}'")
+    logger.debug(f"Generated second response: '{second}'")
 
     # Handle empty compositions
     if not first and not second:
+        logger.debug("FALLBACK TRIGGERED: EMPTY_COMPOSITIONS - returning micro-interjection")
         return _get_micro_interjection(message)
     elif not first:
         first = second
         second = ""
+        logger.debug("First composition empty, using second as first")
     elif not second:
         second = ""
+        logger.debug("Second composition empty")
 
     # Ensure responses are different enough if both exist
     if first and second and SequenceMatcher(None, first, second).ratio() > 0.6:
+        logger.debug("Responses too similar, regenerating second with different distance")
         # Regenerate second response with different distance
         second_candidates = _select(ctx.unique, source_words, 0.9)
+        logger.debug(f"Regenerated second candidates pool size: {len(second_candidates)}")
         second = _compose(
             second_candidates,
             source_words,
@@ -919,20 +997,39 @@ def respond(message: str) -> str:
             context_tokens=context_tokens,
             memory_tokens=memory_tokens,
         )
+        logger.debug(f"Regenerated second response: '{second}'")
 
     # Learning guard: only learn when context passes training threshold
     if _is_context_usable_for_training(ctx):
+        logger.debug("Context usable for training - learning from interaction")
         branches.learn(keys, ctx.raw)
         _update_ngram_with_text(ctx.raw)
+        
+        # Update treembedding system with successful generation
+        if first:
+            response_tokens = ner.tokenize_unicode_aware(first)
+            treembedding.embedding_system.update_sequence(response_tokens)
+        if second:
+            response_tokens = ner.tokenize_unicode_aware(second)
+            treembedding.embedding_system.update_sequence(response_tokens)
+        
         branches.wait()
+    else:
+        logger.debug("Context not suitable for training - skipping learning")
 
     # Return composed response
+    final_response = ""
     if first and second:
-        return f"{first} {second}"
+        final_response = f"{first} {second}"
     elif first:
-        return first
+        final_response = first
     else:
-        return _get_micro_interjection(message)
+        logger.debug("FALLBACK TRIGGERED: NO_COMPOSITIONS - returning micro-interjection")
+        final_response = _get_micro_interjection(message)
+    
+    logger.debug(f"Final response: '{final_response}'")
+    logger.debug(f"=== RESPOND END ===")
+    return final_response
 
 
 if __name__ == "__main__":  # pragma: no cover - manual exercise
