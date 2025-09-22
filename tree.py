@@ -649,8 +649,7 @@ def _select(
     src_vec = _source_vector(source)
     if not src_vec:
         logger.debug("_select: no source vector, returning random selection")
-        random.shuffle(tokens)
-        result = tokens[:limit]
+        result = random.sample(tokens, min(len(tokens), limit))
         logger.debug(f"_select: random selection returned {len(result)} tokens")
         return result
 
@@ -805,8 +804,9 @@ def _compose(
 
     # Add candidate tokens (from context/memory)
     if cand_count > 0 and filtered_candidates:
-        # Simple sampling for now - can be enhanced to prefer certain sources
-        cand_sample = filtered_candidates[:cand_count]
+        # Random sampling for more varied responses
+        sample_size = min(cand_count, len(filtered_candidates))
+        cand_sample = random.sample(filtered_candidates, sample_size)
         for token in cand_sample:
             # Determine source type - simplified for now
             source_type = "context"  # Can be enhanced with more detailed tracking
@@ -850,6 +850,13 @@ def _compose(
 
     if not chosen_tokens:
         return ""
+
+    # Add conjunction for longer selections (more than 4 words)
+    if len(chosen_tokens) > 4:
+        # Insert occasional conjunctions for longer sentences
+        mid_point = len(chosen_tokens) // 2
+        conjunction = random.choice(["and", "through", "within"])
+        chosen_tokens.insert(mid_point, conjunction)
 
     # Join tokens and apply sentence finishing rules
     sentence = " ".join(chosen_tokens)

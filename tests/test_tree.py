@@ -52,11 +52,11 @@ def test_select_random_fallback():
     random.seed(0)
     result = tree._select(tokens, ["hello"], 0.4, limit=5)
     assert result == [
-        "austria",
-        "argentina",
-        "arabia",
-        "africa",
+        "australia",
         "belgium",
+        "africa",
+        "arabia",
+        "argentina",
     ]
 
 
