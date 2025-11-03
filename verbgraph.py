@@ -9,6 +9,9 @@ import re
 from collections import defaultdict, Counter
 from typing import Dict
 
+# Minimum token length to consider for verb tracking
+MIN_TOKEN_LENGTH = 2
+
 
 class VerbGraph:
     """Tracks verb → punctuation mark associations.
@@ -71,7 +74,7 @@ class VerbGraph:
         # In a real implementation, we'd use POS tagging
         for token in tokens:
             normalized_verb = token.lower()
-            if len(normalized_verb) >= 2:  # Skip very short tokens
+            if len(normalized_verb) >= MIN_TOKEN_LENGTH:
                 self._verb_punct_counts[normalized_verb][punct] += 1
 
     def preferred_punct(self, verb: str) -> str:

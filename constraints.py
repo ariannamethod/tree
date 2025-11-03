@@ -97,9 +97,8 @@ def limit_commas(text: str, max_commas: int = 2) -> str:
     parts = text.split(",")
 
     # Keep first max_commas parts with commas, join the rest without commas
-    result_parts = parts[
-        : max_commas + 1
-    ]  # +1 because max_commas commas means max_commas+1 parts
+    # +1 because max_commas commas means max_commas+1 parts
+    result_parts = parts[: max_commas + 1]
     remaining_parts = parts[max_commas + 1 :]
 
     # Join the allowed parts with commas
