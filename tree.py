@@ -28,6 +28,7 @@ import roots
 import treesoning
 import ner
 import treembedding
+import constraints
 
 # Set up logging for debugging entity detection and candidate selection
 logger = logging.getLogger(__name__)
@@ -1026,6 +1027,9 @@ def respond(message: str) -> str:
     else:
         logger.debug("FALLBACK TRIGGERED: NO_COMPOSITIONS - returning micro-interjection")
         final_response = _get_micro_interjection(message)
+    
+    # Apply constraints to finalize the text
+    final_response = constraints.finalize_text(final_response)
     
     logger.debug(f"Final response: '{final_response}'")
     logger.debug(f"=== RESPOND END ===")

@@ -35,6 +35,10 @@ user prompt
 * `ground.py` is the Telegram entry point.  Set `TELEGRAM_TOKEN` in `.env`, run `python -m ground`, and the bot will hand every message to `tree.respond`.
 * `tests/` contains pytest suites that pin the behaviour of keyword selection, repetition avoidance, diversification, sentence endings, Telegram handler wiring, and the async learning queue.
 
+## Language
+
+Currently English-only (EN).
+
 ## Local development
 
 1. Create a virtualenv and install dependencies:
