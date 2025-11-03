@@ -5,7 +5,7 @@ A tiny CPU-only resonant transformer that learns only from the whispers it harve
 ## Architecture at a glance
 
 ```
-user prompt
+human prompt
    │
    ▼
  tree.py – selects charged keywords, builds or recalls context, and composes two divergent sentences
