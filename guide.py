@@ -5,6 +5,8 @@ English interactions, allowing Tree to respond with curated templates
 for specific patterns like greetings and identity questions.
 """
 
+from __future__ import annotations
+
 import random
 import re
 from dataclasses import dataclass
@@ -32,6 +34,9 @@ class Guide:
 
 # Global cache for the loaded guide
 _guide_cache: Optional[Guide] = None
+
+# Module-level random instance for template selection
+_rng = random.Random()
 
 
 def load_guide(path: Optional[str] = None) -> Guide:
@@ -150,8 +155,7 @@ def match(message: str) -> Optional[Match]:
 def choose_template(templates: List[str]) -> str:
     """Choose a template from the list.
 
-    Uses random selection with a separate random instance to avoid
-    affecting global random state.
+    Uses a module-level random instance to avoid affecting global random state.
 
     Args:
         templates: List of template strings
@@ -162,9 +166,8 @@ def choose_template(templates: List[str]) -> str:
     if not templates:
         return ""
 
-    # Use a separate random instance to avoid affecting global state
-    rng = random.Random()
-    return rng.choice(templates)
+    # Use module-level random instance to avoid affecting global state
+    return _rng.choice(templates)
 
 
 def get_query_hints(match_obj: Optional[Match]) -> List[str]:
