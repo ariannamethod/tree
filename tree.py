@@ -29,10 +29,14 @@ import treesoning
 import ner
 import treembedding
 import constraints
+import guide
 
 # Set up logging for debugging entity detection and candidate selection
 logger = logging.getLogger(__name__)
 
+
+# Feature flag for English Guide
+USE_ENGLISH_GUIDE = True
 
 # Micro-interjections for true empties and cold start
 MICRO_INTERJECTIONS = ["Huh?", "Hmmm…", "…"]
@@ -882,6 +886,20 @@ def respond(message: str) -> str:
     if not message.strip():
         logger.debug("Empty input - returning micro-interjection")
         return _get_micro_interjection(message)
+
+    # Check English Guide for pattern matches (when enabled)
+    if USE_ENGLISH_GUIDE:
+        matched = guide.match(message.strip())
+        if matched:
+            logger.debug(f"Matched guide pattern: {matched.pattern}")
+            template = guide.choose_template(matched.templates)
+            if template:
+                logger.debug(f"Using guide template: {template}")
+                # Apply constraints to finalize the text
+                final_response = constraints.finalize_text(template)
+                logger.debug(f"Final response from guide: '{final_response}'")
+                logger.debug(f"=== RESPOND END (via guide) ===")
+                return final_response
 
     _update_ngrams_from_roots()
 
